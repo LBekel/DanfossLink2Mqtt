@@ -1,0 +1,37 @@
+# Zentrale Konfiguration fuer DanfossLink2Mqtt
+# Alle Laufzeitparameter werden ausschliesslich aus dieser Datei gelesen.
+
+settings:
+  # ADB
+  adb_host: "localhost"
+  adb_port: 5037
+  adb_device_ip: "192.168.188.160"
+  adb_device_port: 5555
+
+  # MQTT
+  mqtt_broker: "mqtt"
+  mqtt_port: 1883
+  mqtt_username: "DanfossLink"
+  mqtt_password: ""
+  mqtt_topic_base: "DanfossLink"
+
+  # Danfoss / Home Assistant
+  homeassistant_discovery: true
+  homeassistant_discovery_prefix: "homeassistant"
+  thermostat_min_temp: 6.0
+  thermostat_max_temp: 26.0
+  thermostat_temp_step: 0.5
+
+  # Steuer-/Parser-Verhalten
+  poll_interval: 5
+  log_level: "INFO"
+  set_temperature_burst_steps: 30
+  set_temperature_swipe_pause_s: 2.0
+  set_temperature_readback_delay_s: 1.5
+  publish_only_changes: true
+  cache_duration: 5
+  ui_automator_timeout: 5
+
+
+ui_elements: {}
+

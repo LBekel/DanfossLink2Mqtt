@@ -1,0 +1,13 @@
+services:
+  danfosslink2mqtt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: danfosslink2mqtt
+    restart: unless-stopped
+    network_mode: bridge
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    # Wenn dein MQTT Broker auf dem Docker Host laeuft, in config.yaml
+    # settings.mqtt_broker auf den Hostnamen setzen (z.B. host.docker.internal)
+
