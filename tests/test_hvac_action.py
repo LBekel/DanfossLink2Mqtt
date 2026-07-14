@@ -1,6 +1,8 @@
 """Unit-Tests fuer HVAC-Action-Ableitung."""
 import unittest
 from unittest.mock import Mock
+import json
+import time
 
 from core.adb_controller import ADBController
 from core.main_ui import DanfossLink2MQTT
@@ -91,6 +93,50 @@ class TestTemperatureParsing(unittest.TestCase):
         self.assertIsNone(parser._parse_temperature(""))
         self.assertIsNone(parser._parse_temperature("invalid"))
         self.assertIsNone(parser._parse_temperature("-- C"))
+
+
+class TestSetTemperaturePublish(unittest.TestCase):
+    def test_setpoint_is_published_immediately_after_command(self):
+        app = DanfossLink2MQTT()
+        app.adb = Mock()
+        app.ui_parser = Mock()
+        app.ui_config = Mock()
+        app.ui_config.get_setting = Mock(side_effect=lambda key, default=None: default)
+        app.mqtt = Mock()
+
+        # Force an early return after immediate publish to prove
+        # publishing does not wait for spinner/polling success.
+        app.ui_parser.get_bounds.return_value = None
+
+        payload = json.dumps({"room": "hwr_eg", "temperature": 23.5})
+        app._handle_set_temperature(payload)
+
+        app.mqtt.publish.assert_any_call("thermostats/hwr_eg/setpoint", 23.5)
+
+
+class TestPendingSetpointOverride(unittest.TestCase):
+    def test_polling_uses_pending_setpoint_until_ui_catches_up(self):
+        app = DanfossLink2MQTT()
+        app.mqtt = Mock()
+        app.ui_parser = Mock()
+        app.ui_parser.extract_danfoss_thermostats.return_value = [
+            {
+                "slug": "hwr_eg",
+                "label": "HWR EG",
+                "kind": "room",
+                "temperature_c": 20.0,
+                "setpoint_c": 19.0,
+            }
+        ]
+
+        app.ui_config = Mock()
+        app.ui_config.get_setting = Mock(side_effect=lambda key, default=None: False if key == "homeassistant_discovery" else default)
+        app.pending_setpoints["hwr_eg"] = {"target": 22.5, "set_at": time.time()}
+
+        app._publish_danfoss_thermostats(force=True)
+
+        app.mqtt.publish.assert_any_call("thermostats/hwr_eg/setpoint", 22.5)
+        app.mqtt.publish.assert_any_call("thermostats/hwr_eg/hvac_action", "heating")
 
 
 if __name__ == "__main__":

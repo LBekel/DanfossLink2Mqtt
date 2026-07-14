@@ -2,6 +2,8 @@
 import logging
 import json
 import time
+import queue
+import threading
 from typing import Callable, Dict, Any
 import paho.mqtt.client as mqtt
 
@@ -31,6 +33,9 @@ class MQTTBridge:
         self.client = mqtt.Client(client_id="DanfossLink2Mqtt")
         self.connected = False
         self.callbacks: Dict[str, Callable] = {}
+        self._command_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        self._command_worker = threading.Thread(target=self._command_worker_loop, daemon=True)
+        self._command_worker.start()
 
         # Set callbacks
         self.client.on_connect = self._on_connect
@@ -120,10 +125,24 @@ class MQTTBridge:
             command_type = '/'.join(parts[2:])
 
             if command_type in self.callbacks:
-                try:
-                    self.callbacks[command_type](payload)
-                except Exception as e:
-                    logger.error(f"Error processing command '{command_type}': {e}")
+                # Handlers can take several seconds (ADB/UI automation). Run
+                # them outside MQTT callback thread so outgoing publishes are
+                # not delayed until handler completion.
+                self._command_queue.put((command_type, payload))
+
+    def _command_worker_loop(self) -> None:
+        """Process command handlers sequentially outside MQTT callback thread."""
+        while True:
+            command_type, payload = self._command_queue.get()
+            try:
+                handler = self.callbacks.get(command_type)
+                if not handler:
+                    continue
+                handler(payload)
+            except Exception as e:
+                logger.error(f"Error processing command '{command_type}': {e}")
+            finally:
+                self._command_queue.task_done()
 
     def _on_publish(self, client, userdata, mid):
         """Callback after publish"""

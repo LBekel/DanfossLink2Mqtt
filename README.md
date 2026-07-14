@@ -1,13 +1,13 @@
 # DanfossLink2Mqtt
 
-DanfossLink2Mqtt steuert die Danfoss Link Android-App per ADB und publiziert Thermostatdaten per MQTT.
+DanfossLink2Mqtt controls the Danfoss Link Android app via ADB and publishes thermostat data over MQTT.
 
-## Projektfokus
+## Project Focus
 
-- MQTT-Steuerung und Status unter `DanfossLink2Mqtt/...`
-- Home Assistant MQTT Discovery fuer `climate`-Entitaeten
+- MQTT control and status under `<mqtt_topic_base>/...` (configured in `config.yaml`)
+- Home Assistant MQTT Discovery for `climate` entities
 
-## Projektstruktur
+## Project Structure
 
 ```text
 main.py
@@ -26,9 +26,10 @@ main.py
   config.yaml
 tests/
   test_hvac_action.py
+  test_mqtt_bridge.py
 ```
 
-## Schnellstart (Windows PowerShell)
+## Quick Start (Windows PowerShell)
 
 ```powershell
 python -m venv .venv
@@ -39,11 +40,11 @@ python main.py
 
 ## Docker (Linux VM)
 
-### Voraussetzung
+### Prerequisites
 
-- Docker Engine und Docker Compose Plugin sind auf der VM installiert.
+- Docker Engine and Docker Compose plugin are installed on the VM.
 
-### Start mit Docker Compose
+### Start with Docker Compose
 
 ```bash
 docker compose build
@@ -51,13 +52,13 @@ docker compose up -d
 docker compose logs -f danfosslink2mqtt
 ```
 
-Stoppen:
+Stop:
 
 ```bash
 docker compose down
 ```
 
-### Start ohne Compose
+### Start without Compose
 
 ```bash
 docker build -t danfosslink2mqtt:latest .
@@ -67,70 +68,119 @@ docker run -d --name danfosslink2mqtt --restart unless-stopped \
 docker logs -f danfosslink2mqtt
 ```
 
-Hinweise:
+Notes:
 
-- `config.yaml` bleibt die einzige Konfigurationsdatei.
-- Wenn MQTT auf dem Host der VM laeuft, setze in `config.yaml` einen erreichbaren Hostnamen/IP (z.B. `host.docker.internal` je nach Plattform).
+- `config.yaml` is the only runtime configuration file.
+- If MQTT runs on the VM host, set a reachable host/IP in `config.yaml` (for example `host.docker.internal`, depending on platform).
 
-## Konfiguration
+### Auto-start on VM Boot and Restart on Failure
+
+On a Linux VM with `systemd`, enable Docker so it starts automatically after reboot:
+
+```bash
+sudo systemctl enable docker
+sudo systemctl start docker
+sudo systemctl status docker
+```
+
+Container restart behavior is already configured:
+
+- In `docker-compose.yml`, the service uses `restart: unless-stopped`.
+- In the standalone `docker run` example, `--restart unless-stopped` is already included.
+
+This means the container will be started again automatically after crashes, daemon restarts, and VM reboot (as long as it was not manually stopped).
+
+Optional check after reboot:
+
+```bash
+docker ps --filter "name=danfosslink2mqtt"
+docker inspect -f '{{ .HostConfig.RestartPolicy.Name }}' danfosslink2mqtt
+```
+
+## Configuration
 
 ### `config.yaml`
 
-Alle Parameter werden aus einer einzigen Datei gelesen: `config.yaml`.
+All parameters are loaded from a single file: `config.yaml`.
 
-- `settings.adb_device_ip` und `settings.adb_device_port` fuer das Android-Geraet
-- `settings.mqtt_broker`, `settings.mqtt_port`, `settings.mqtt_topic_base` fuer MQTT
-- `settings.poll_interval` fuer Laufzeitverhalten
-- `settings.homeassistant_discovery` und `settings.homeassistant_discovery_prefix` fuer HA Discovery
-- Optionale `ui_elements` koennen zusaetzliche App-Werte publizieren
+- `settings.adb_device_ip` and `settings.adb_device_port` for the Android device
+- `settings.mqtt_broker`, `settings.mqtt_port`, `settings.mqtt_topic_base` for MQTT
+- `settings.poll_interval` for runtime polling behavior
+- `settings.homeassistant_discovery` and `settings.homeassistant_discovery_prefix` for HA discovery
 
 ## MQTT Topics
 
-### Befehle (abonniert)
+Note: Examples below use `DanfossLink`. The prefix is configurable via `settings.mqtt_topic_base`.
+
+### Commands (subscribed)
 
 ```text
-DanfossLink2Mqtt/command/set_temperature
+DanfossLink/command/set_temperature
 ```
 
-Payload-Beispiel:
+Payload example:
 
 ```json
 {"room": "living_room", "temperature": 21.5}
 ```
 
-### Thermostat-Status (publiziert)
+### Thermostat Status (published)
 
 ```text
-DanfossLink2Mqtt/thermostats/<slug>/label
-DanfossLink2Mqtt/thermostats/<slug>/kind
-DanfossLink2Mqtt/thermostats/<slug>/value
-DanfossLink2Mqtt/thermostats/<slug>/setpoint
-DanfossLink2Mqtt/thermostats/<slug>/mode
-DanfossLink2Mqtt/thermostats/<slug>/hvac_action
-DanfossLink2Mqtt/thermostats/<slug>/setpoint_set_at
-DanfossLink2Mqtt/thermostats/<slug>/setpoint_error
+DanfossLink/thermostats/<slug>/label
+DanfossLink/thermostats/<slug>/kind
+DanfossLink/thermostats/<slug>/value
+DanfossLink/thermostats/<slug>/setpoint
+DanfossLink/thermostats/<slug>/mode
+DanfossLink/thermostats/<slug>/hvac_action
+DanfossLink/thermostats/<slug>/setpoint_error
 ```
 
-`hvac_action` wird aus Ist/Soll abgeleitet:
+### Service Status (published)
 
-- `idle`, wenn `setpoint < value`
-- sonst `heating`
+```text
+DanfossLink/status
+DanfossLink/status/error
+```
+
+- `status` uses MQTT LWT: `online` on connect, `offline` on disconnect/shutdown.
+- `status/error` is published on startup errors (for example if the Danfoss app is not installed).
+
+### Setpoint Behavior
+
+- On `command/set_temperature`, the target setpoint is published immediately to `thermostats/<slug>/setpoint`.
+- If UI readback lags behind, a short internal pending state prevents the polling cycle from immediately overwriting the new value with stale data.
+- The `setpoint_set_at` topic is no longer used.
+
+`hvac_action` is derived from current vs target temperature:
+
+- `idle` when `setpoint < value`
+- otherwise `heating`
 
 ## Home Assistant Integration
 
-### Automatische MQTT Discovery
+### Automatic MQTT Discovery
 
-Bei aktivem Discovery wird pro Raum eine MQTT-`climate`-Entity angelegt.
+When discovery is enabled, one MQTT `climate` entity is published per room.
 
-- `temperature_command_topic`: `DanfossLink2Mqtt/command/set_temperature`
-- `temperature_state_topic`: `DanfossLink2Mqtt/thermostats/<slug>/setpoint`
-- `current_temperature_topic`: `DanfossLink2Mqtt/thermostats/<slug>/value`
-- `mode_state_topic`: `DanfossLink2Mqtt/thermostats/<slug>/mode`
-- `action_topic`: `DanfossLink2Mqtt/thermostats/<slug>/hvac_action`
+- `temperature_command_topic`: `DanfossLink/command/set_temperature`
+- `temperature_state_topic`: `DanfossLink/thermostats/<slug>/setpoint`
+- `current_temperature_topic`: `DanfossLink/thermostats/<slug>/value`
+- `mode_state_topic`: `DanfossLink/thermostats/<slug>/mode`
+- `action_topic`: `DanfossLink/thermostats/<slug>/hvac_action`
 
-## Entwicklung und Tests
+Other discovery fields that are set:
+
+- `icon: mdi:heating-coil`
+- `availability_topic: <mqtt_topic_base>/status` with `payload_available=online`, `payload_not_available=offline`
+- `modes: ["heat"]`
+- `min_temp`, `max_temp`, `temp_step` from `config.yaml`
+- `precision: 0.1`
+
+## Development and Tests
 
 ```powershell
 python -m unittest tests.test_hvac_action
-python -m unittest tests.test_connections
+python -m unittest tests.test_mqtt_bridge
+python -m unittest discover -s tests -p "test_*.py" -v
 ```

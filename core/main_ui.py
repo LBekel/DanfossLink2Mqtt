@@ -35,6 +35,9 @@ class DanfossLink2MQTT:
         self.running = False
         self.polling_thread: Optional[threading.Thread] = None
         self.discovery_registry: Set[str] = set()
+        # Prevent stale poll readbacks from immediately overwriting a freshly
+        # commanded target temperature.
+        self.pending_setpoints: Dict[str, Dict[str, float]] = {}
 
         # Signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -232,6 +235,15 @@ class DanfossLink2MQTT:
             logger.error("set_temperature: 'room' missing in payload")
             return
 
+        self.pending_setpoints[room_slug] = {
+            "target": float(target_temp),
+            "set_at": float(time.time())
+        }
+
+        # Optimistic state update: publish command target immediately so
+        # downstream consumers do not have to wait for the next poll/readback.
+        mqtt.publish(f"thermostats/{room_slug}/setpoint", target_temp)
+
         package_name = DANFOSS_APP_PACKAGE
         edit_res_id = f"{package_name}:id/roomoverview_edit_button"
 
@@ -322,7 +334,6 @@ class DanfossLink2MQTT:
         # 4) Publish status
         if reached:
             mqtt.publish(f"thermostats/{room_slug}/setpoint", target_temp)
-            mqtt.publish(f"thermostats/{room_slug}/setpoint_set_at", int(time.time()))
             logger.info(f"set_temperature: '{room_slug}' setpoint set to {target_temp}°C")
         else:
             mqtt.publish(
@@ -388,14 +399,34 @@ class DanfossLink2MQTT:
                 continue
 
             base_topic = f"thermostats/{slug}"
+            measured_setpoint = self._to_float(thermostat.get("setpoint_c"))
+            pending_entry = self.pending_setpoints.get(slug)
+            setpoint_to_publish = thermostat.get("setpoint_c", "")
+            if pending_entry:
+                pending_target = float(pending_entry.get("target", 0.0))
+                pending_age_s = time.time() - float(pending_entry.get("set_at", 0.0))
+                pending_ttl_s = 30.0
+                pending_tolerance = 0.45
+
+                # Keep optimistic setpoint while the app/UI catches up.
+                if (
+                    measured_setpoint is not None
+                    and abs(measured_setpoint - pending_target) <= pending_tolerance
+                ):
+                    self.pending_setpoints.pop(slug, None)
+                elif pending_age_s <= pending_ttl_s:
+                    setpoint_to_publish = pending_target
+                else:
+                    self.pending_setpoints.pop(slug, None)
+
             self.mqtt.publish(f"{base_topic}/label", thermostat.get("label", ""))
             self.mqtt.publish(f"{base_topic}/kind", thermostat.get("kind", "room"))
             self.mqtt.publish(f"{base_topic}/value", thermostat.get("temperature_c", ""))
-            self.mqtt.publish(f"{base_topic}/setpoint", thermostat.get("setpoint_c", ""))
+            self.mqtt.publish(f"{base_topic}/setpoint", setpoint_to_publish)
 
             # Derive hvac_action from setpoint/current: setpoint < value -> idle, else heating.
             current_temp = self._to_float(thermostat.get("temperature_c"))
-            target_temp = self._to_float(thermostat.get("setpoint_c"))
+            target_temp = self._to_float(setpoint_to_publish)
             hvac_action = self._derive_hvac_action(current_temp, target_temp)
             if hvac_action:
                 self.mqtt.publish(f"{base_topic}/hvac_action", hvac_action)
@@ -449,7 +480,7 @@ class DanfossLink2MQTT:
             climate_payload = {
                 "name": f"{label}",
                 "unique_id": f"{MQTT_TOPIC_BASE}_{room_key}_climate",
-                "entity_picture": "mdi:heating-coil",
+                "icon": "mdi:heating-coil",
                 "temperature_command_topic": f"{MQTT_TOPIC_BASE}/command/set_temperature",
                 "temperature_command_template": (
                     "{\"room\": \"" + room_key + "\", \"temperature\": {{ value }}}"
@@ -462,7 +493,7 @@ class DanfossLink2MQTT:
                 "payload_available": "online",
                 "payload_not_available": "offline",
                 "modes": ["heat"],
-                "min_temp": float(self.ui_config.get_setting("thermostat_min_temp", 5.0)),
+                "min_temp": float(self.ui_config.get_setting("thermostat_min_temp", 6.0)),
                 "max_temp": float(self.ui_config.get_setting("thermostat_max_temp", 30.0)),
                 "temp_step": float(self.ui_config.get_setting("thermostat_temp_step", 0.5)),
                 "precision": 0.1,
