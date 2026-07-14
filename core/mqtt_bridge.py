@@ -71,8 +71,16 @@ class MQTTBridge:
     def disconnect(self) -> None:
         """Disconnect from the MQTT broker"""
         try:
-            self.client.loop_stop()
+            # Publish an explicit offline status on controlled shutdown so HA
+            # immediately marks entities unavailable even without LWT.
+            if self.connected:
+                status_topic = f"{self.topic_base}/status"
+                self.client.publish(status_topic, "offline", qos=1, retain=True)
+
+            # Send DISCONNECT while loop is active, then stop loop thread.
             self.client.disconnect()
+            self.client.loop_stop()
+            self.connected = False
             logger.info("MQTT connection closed")
         except Exception as e:
             logger.error(f"Error closing MQTT connection: {e}")
