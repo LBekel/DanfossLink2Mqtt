@@ -31,7 +31,3 @@ settings:
   publish_only_changes: true
   cache_duration: 5
   ui_automator_timeout: 5
-
-
-ui_elements: {}
-

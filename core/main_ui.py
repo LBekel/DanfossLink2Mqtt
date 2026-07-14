@@ -59,13 +59,6 @@ class DanfossLink2MQTT:
         logger.info("Loading configuration...")
         self.ui_config = UIConfigManager("config.yaml")
 
-        # Validate config
-        validation = self.ui_config.validate_config()
-        if validation["errors"]:
-            logger.error(f"Configuration errors: {validation['errors']}")
-        if validation["warnings"]:
-            logger.warning(f"Configuration warnings: {validation['warnings']}")
-
         # Read IP and port from ui_config (fallback to config.py / env variable)
         device_ip = str(self.ui_config.get_setting("adb_device_ip", ADB_DEVICE_IP))
         device_port = int(self.ui_config.get_setting("adb_device_port", ADB_DEVICE_PORT))
@@ -456,6 +449,7 @@ class DanfossLink2MQTT:
             climate_payload = {
                 "name": f"{label}",
                 "unique_id": f"{MQTT_TOPIC_BASE}_{room_key}_climate",
+                "entity_picture": "mdi:heating-coil",
                 "temperature_command_topic": f"{MQTT_TOPIC_BASE}/command/set_temperature",
                 "temperature_command_template": (
                     "{\"room\": \"" + room_key + "\", \"temperature\": {{ value }}}"
