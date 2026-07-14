@@ -1,4 +1,4 @@
-"""Manager für UIAutomator-Konfigurationsdatei"""
+"""Manager for the UIAutomator configuration file"""
 import logging
 import yaml
 import json
@@ -9,27 +9,27 @@ logger = logging.getLogger(__name__)
 
 
 class UIConfigManager:
-    """Verwaltet die UIAutomator-Konfiguration"""
+    """Manages the UIAutomator configuration"""
 
     def __init__(self, config_path: str = "config.yaml"):
         """
-        Initialisiert den Config Manager
+        Initializes the config manager.
 
         Args:
-            config_path: Pfad zur Konfigurationsdatei
+            config_path: Path to the configuration file
         """
         self.config_path = Path(config_path)
         self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
         """
-        Lädt die Konfigurationsdatei
+        Load the configuration file.
 
         Returns:
-            Konfigurationsdict oder leeres Dict bei Fehler
+            Configuration dict or empty dict on error
         """
         if not self.config_path.exists():
-            logger.warning(f"Konfigurationsdatei nicht gefunden: {self.config_path}")
+            logger.warning(f"Configuration file not found: {self.config_path}")
             return {"ui_elements": {}, "settings": {}}
 
         try:
@@ -39,21 +39,21 @@ class UIConfigManager:
                 elif self.config_path.suffix.lower() == '.json':
                     config = json.load(f)
                 else:
-                    logger.error(f"Unbekanntes Dateiformat: {self.config_path.suffix}")
+                    logger.error(f"Unknown file format: {self.config_path.suffix}")
                     return {"ui_elements": {}, "settings": {}}
 
-            logger.info(f"Konfiguration geladen: {self.config_path}")
+            logger.info(f"Configuration loaded: {self.config_path}")
             return config
         except Exception as e:
-            logger.error(f"Fehler beim Laden der Konfiguration: {e}")
+            logger.error(f"Error loading configuration: {e}")
             return {"ui_elements": {}, "settings": {}}
 
     def save_config(self) -> bool:
         """
-        Speichert die aktuelle Konfiguration
+        Save the current configuration.
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             if self.config_path.suffix.lower() == '.yaml':
@@ -63,27 +63,27 @@ class UIConfigManager:
                 with open(self.config_path, 'w', encoding='utf-8') as f:
                     json.dump(self.config, f, indent=2, ensure_ascii=False)
 
-            logger.info(f"Konfiguration gespeichert: {self.config_path}")
+            logger.info(f"Configuration saved: {self.config_path}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Speichern der Konfiguration: {e}")
+            logger.error(f"Error saving configuration: {e}")
             return False
 
     def get_ui_elements(self) -> Dict[str, Dict[str, Any]]:
         """
-        Gibt alle definierten UI-Elemente zurück
+        Return all defined UI elements.
 
         Returns:
-            Dictionary mit UI-Elementen
+            Dictionary with UI elements
         """
         return self.config.get("ui_elements", {})
 
     def get_enabled_elements(self) -> Dict[str, Dict[str, Any]]:
         """
-        Gibt nur aktivierte UI-Elemente zurück
+        Return only enabled UI elements.
 
         Returns:
-            Dictionary mit aktivierten UI-Elementen
+            Dictionary with enabled UI elements
         """
         elements = self.get_ui_elements()
         return {
@@ -93,31 +93,31 @@ class UIConfigManager:
 
     def get_element(self, name: str) -> Optional[Dict[str, Any]]:
         """
-        Gibt ein spezifisches UI-Element zurück
+        Return a specific UI element.
 
         Args:
-            name: Name des Elements
+            name: Name of the element
 
         Returns:
-            Element-Config oder None
+            Element config or None
         """
         return self.get_ui_elements().get(name)
 
     def add_element(self, name: str, resource_id: str, value_type: str = "text",
                    mqtt_topic: str = "", description: str = "", enabled: bool = True) -> bool:
         """
-        Fügt ein neues UI-Element hinzu
+        Add a new UI element.
 
         Args:
-            name: Name des Elements
-            resource_id: Die resource-id
-            value_type: Typ des auszulesenden Wertes
-            mqtt_topic: MQTT-Topic für Veröffentlichung
-            description: Beschreibung
-            enabled: Ob Element aktiviert ist
+            name: Name of the element
+            resource_id: The resource-id
+            value_type: Type of value to read
+            mqtt_topic: MQTT topic for publishing
+            description: Description
+            enabled: Whether the element is enabled
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             if "ui_elements" not in self.config:
@@ -131,67 +131,67 @@ class UIConfigManager:
                 "enabled": enabled
             }
 
-            logger.info(f"Element hinzugefügt: {name}")
+            logger.info(f"Element added: {name}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Hinzufügen des Elements: {e}")
+            logger.error(f"Error adding element: {e}")
             return False
 
     def update_element(self, name: str, **kwargs) -> bool:
         """
-        Aktualisiert ein bestehendes Element
+        Update an existing element.
 
         Args:
-            name: Name des Elements
-            **kwargs: Felder zum Aktualisieren
+            name: Name of the element
+            **kwargs: Fields to update
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             element = self.get_element(name)
             if not element:
-                logger.warning(f"Element nicht gefunden: {name}")
+                logger.warning(f"Element not found: {name}")
                 return False
 
             element.update(kwargs)
-            logger.info(f"Element aktualisiert: {name}")
+            logger.info(f"Element updated: {name}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Aktualisieren des Elements: {e}")
+            logger.error(f"Error updating element: {e}")
             return False
 
     def remove_element(self, name: str) -> bool:
         """
-        Entfernt ein Element
+        Remove an element.
 
         Args:
-            name: Name des Elements
+            name: Name of the element
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             if name in self.get_ui_elements():
                 del self.config["ui_elements"][name]
-                logger.info(f"Element entfernt: {name}")
+                logger.info(f"Element removed: {name}")
                 return True
             else:
-                logger.warning(f"Element nicht gefunden: {name}")
+                logger.warning(f"Element not found: {name}")
                 return False
         except Exception as e:
-            logger.error(f"Fehler beim Entfernen des Elements: {e}")
+            logger.error(f"Error removing element: {e}")
             return False
 
     def toggle_element(self, name: str) -> bool:
         """
-        Aktiviert/Deaktiviert ein Element
+        Enable/disable an element.
 
         Args:
-            name: Name des Elements
+            name: Name of the element
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             element = self.get_element(name)
@@ -199,55 +199,55 @@ class UIConfigManager:
                 return False
 
             element["enabled"] = not element.get("enabled", True)
-            state = "aktiviert" if element["enabled"] else "deaktiviert"
+            state = "enabled" if element["enabled"] else "disabled"
             logger.info(f"Element {state}: {name}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Toggle des Elements: {e}")
+            logger.error(f"Error toggling element: {e}")
             return False
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         """
-        Gibt eine globale Einstellung zurück
+        Return a global setting.
 
         Args:
-            key: Schlüssel der Einstellung
-            default: Standardwert
+            key: Key of the setting
+            default: Default value
 
         Returns:
-            Der Wert oder default
+            The value or default
         """
         settings = self.config.get("settings", {})
         return settings.get(key, default)
 
     def set_setting(self, key: str, value: Any) -> bool:
         """
-        Setzt eine globale Einstellung
+        Set a global setting.
 
         Args:
-            key: Schlüssel der Einstellung
-            value: Der neue Wert
+            key: Key of the setting
+            value: The new value
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             if "settings" not in self.config:
                 self.config["settings"] = {}
 
             self.config["settings"][key] = value
-            logger.info(f"Einstellung gespeichert: {key} = {value}")
+            logger.info(f"Setting saved: {key} = {value}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Setzen der Einstellung: {e}")
+            logger.error(f"Error setting value: {e}")
             return False
 
     def list_all_elements(self) -> List[Dict[str, Any]]:
         """
-        Listet alle Elemente mit ihren Informationen auf
+        List all elements with their information.
 
         Returns:
-            Liste aller Elemente
+            List of all elements
         """
         elements_list = []
         for name, config in self.get_ui_elements().items():
@@ -265,55 +265,55 @@ class UIConfigManager:
 
     def export_to_json(self, filepath: str) -> bool:
         """
-        Exportiert Konfiguration zu JSON
+        Export configuration to JSON.
 
         Args:
-            filepath: Zielpath
+            filepath: Target path
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
-            logger.info(f"Konfiguration exportiert: {filepath}")
+            logger.info(f"Configuration exported: {filepath}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Export: {e}")
+            logger.error(f"Error exporting: {e}")
             return False
 
     def import_from_json(self, filepath: str) -> bool:
         """
-        Importiert Konfiguration von JSON
+        Import configuration from JSON.
 
         Args:
-            filepath: Quellpath
+            filepath: Source path
 
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 imported_config = json.load(f)
 
-            # Merge mit bestehender Konfiguration
+            # Merge with existing configuration
             if "ui_elements" in imported_config:
                 if "ui_elements" not in self.config:
                     self.config["ui_elements"] = {}
                 self.config["ui_elements"].update(imported_config["ui_elements"])
 
-            logger.info(f"Konfiguration importiert: {filepath}")
+            logger.info(f"Configuration imported: {filepath}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Import: {e}")
+            logger.error(f"Error importing: {e}")
             return False
 
     def validate_config(self) -> Dict[str, List[str]]:
         """
-        Validiert die Konfiguration
+        Validate the configuration.
 
         Returns:
-            Dictionary mit Errors und Warnings
+            Dictionary with errors and warnings
         """
         errors = []
         warnings = []
@@ -322,26 +322,25 @@ class UIConfigManager:
             elements = self.get_ui_elements()
 
             if not elements:
-                warnings.append("Keine UI-Elemente definiert")
+                warnings.append("No UI elements defined")
 
             for name, config in elements.items():
-                # Überprüfe erforderliche Felder
+                # Check required fields
                 if not config.get("resource_id"):
-                    errors.append(f"Element '{name}': resource_id fehlt")
+                    errors.append(f"Element '{name}': resource_id missing")
 
                 if not config.get("mqtt_topic"):
-                    warnings.append(f"Element '{name}': mqtt_topic nicht gesetzt")
+                    warnings.append(f"Element '{name}': mqtt_topic not set")
 
-                # Überprüfe Datentypen
+                # Check data types
                 valid_types = ["text", "content-desc", "checked", "selected", "enabled", "bounds"]
                 if config.get("type") not in valid_types:
-                    errors.append(f"Element '{name}': Ungültiger type '{config.get('type')}'")
+                    errors.append(f"Element '{name}': invalid type '{config.get('type')}'")
 
         except Exception as e:
-            errors.append(f"Validierungsfehler: {e}")
+            errors.append(f"Validation error: {e}")
 
         return {
             "errors": errors,
             "warnings": warnings
         }
-

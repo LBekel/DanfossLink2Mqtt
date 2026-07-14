@@ -1,4 +1,4 @@
-"""DanfossLink2Mqtt Hauptanwendung mit UIAutomator-Integration."""
+"""DanfossLink2Mqtt main application with UIAutomator integration."""
 import logging
 import time
 import sys
@@ -15,7 +15,7 @@ from .mqtt_bridge import MQTTBridge
 from .ui_automator import UIAutomatorParser
 from .ui_config_manager import UIConfigManager
 
-# Logging konfigurieren
+# Configure logging
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 class DanfossLink2MQTT:
-    """Anwendung zur Fernsteuerung der Danfoss Link App via MQTT."""
+    """Application for remote-controlling the Danfoss Link app via MQTT."""
 
     def __init__(self):
-        """Initialisiert die Anwendung"""
+        """Initializes the application"""
         self.adb: Optional[ADBController] = None
         self.mqtt: Optional[MQTTBridge] = None
         self.ui_parser: Optional[UIAutomatorParser] = None
@@ -36,56 +36,56 @@ class DanfossLink2MQTT:
         self.polling_thread: Optional[threading.Thread] = None
         self.discovery_registry: Set[str] = set()
 
-        # Signal-Handler für graceful Shutdown
+        # Signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, sig, frame):
-        """Handler für SIGINT und SIGTERM"""
-        logger.info("Shutdown-Signal empfangen")
+        """Handler for SIGINT and SIGTERM"""
+        logger.info("Shutdown signal received")
         self.stop()
         sys.exit(0)
 
     def initialize(self) -> bool:
         """
-        Initialisiert ADB, MQTT und UIAutomator
+        Initialize ADB, MQTT and UIAutomator.
 
         Returns:
-            True bei Erfolg, False bei Fehler
+            True on success, False on error
         """
-        logger.info("Initialisiere DanfossLink2Mqtt...")
+        logger.info("Initializing DanfossLink2Mqtt...")
 
-        # Lade UIAutomator-Konfiguration zuerst (enthält ggf. adb_device_ip)
-        logger.info("Lade UIAutomator-Konfiguration...")
+        # Load UIAutomator configuration first (may contain adb_device_ip)
+        logger.info("Loading configuration...")
         self.ui_config = UIConfigManager("config.yaml")
 
-        # Validiere Config
+        # Validate config
         validation = self.ui_config.validate_config()
         if validation["errors"]:
-            logger.error(f"Konfigurationsfehler: {validation['errors']}")
+            logger.error(f"Configuration errors: {validation['errors']}")
         if validation["warnings"]:
-            logger.warning(f"Konfigurationswarnungen: {validation['warnings']}")
+            logger.warning(f"Configuration warnings: {validation['warnings']}")
 
-        # IP und Port aus ui_config lesen (Fallback auf config.py / Umgebungsvariable)
+        # Read IP and port from ui_config (fallback to config.py / env variable)
         device_ip = str(self.ui_config.get_setting("adb_device_ip", ADB_DEVICE_IP))
         device_port = int(self.ui_config.get_setting("adb_device_port", ADB_DEVICE_PORT))
 
-        # Initialisiere ADB
-        logger.info(f"Verbinde mit ADB-Gerät {device_ip}:{device_port}...")
+        # Initialize ADB
+        logger.info(f"Connecting to ADB device {device_ip}:{device_port}...")
         self.adb = ADBController(ADB_HOST, ADB_PORT, device_ip, device_port)
         if not self.adb.connect():
-            logger.error("ADB-Verbindung fehlgeschlagen")
+            logger.error("ADB connection failed")
             return False
 
-        # Lese Geräteeigenschaften
+        # Read device properties
         props = self.adb.get_device_properties()
-        logger.info(f"Gerät verbunden: {props.get('ro.build.fingerprint', 'Unbekannt')}")
+        logger.info(f"Device connected: {props.get('ro.build.fingerprint', 'Unknown')}")
 
-        # Initialisiere MQTT
-        logger.info("Verbinde mit MQTT-Broker...")
+        # Initialize MQTT
+        logger.info("Connecting to MQTT broker...")
         self.mqtt = MQTTBridge(MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC_BASE)
         if not self.mqtt.connect():
-            logger.error("MQTT-Verbindung fehlgeschlagen")
+            logger.error("MQTT connection failed")
             self.adb.disconnect()
             return False
 
@@ -93,61 +93,78 @@ class DanfossLink2MQTT:
             return False
         adb = self.adb
 
-        # Initialisiere UIAutomator
-        logger.info("Initialisiere UIAutomator Parser...")
+        # Initialize UIAutomator
+        logger.info("Initializing UIAutomator parser...")
         self.ui_parser = UIAutomatorParser(adb)
 
-
-        # Registriere Befehls-Handler
+        # Register command handlers
         self._register_command_handlers()
 
-        # Starte Danfoss App automatisch beim Programmstart
-        self._launch_danfoss_app()
+        # Start Danfoss app automatically on startup
+        if not self._launch_danfoss_app():
+            logger.error("Initialization aborted: Danfoss app could not be launched")
+            self.stop()
+            return False
 
-        logger.info("Initialisierung erfolgreich")
+        logger.info("Initialization successful")
         return True
 
     def _register_command_handlers(self) -> None:
-        """Registriert alle verfügbaren Befehls-Handler"""
+        """Register all available command handlers"""
         self.mqtt.register_command_handler("set_temperature", self._handle_set_temperature)
 
     def _launch_danfoss_app(self) -> bool:
-        """Startet die Danfoss-App via SplashActivity und bestätigt Fehlerdialoge.
+        """Start the Danfoss app via SplashActivity and confirm error dialogs.
 
-        Einheitliche Startprozedur für alle Auslöser (initialize, app/start, reboot, recovery).
-        Läuft die App bereits, wird sie nicht neu gestartet und der Ladevorgang wird übersprungen.
+        Unified startup procedure for all triggers (initialize, app/start, reboot, recovery).
+        If the app is already running it will not be restarted and loading wait is skipped.
 
         Returns:
-            True wenn App läuft (bereits lief oder erfolgreich gestartet wurde)
+            True if app is running (was already running or started successfully)
         """
         adb = self.adb
         ui_parser = self.ui_parser
+        mqtt = self.mqtt
         if not adb:
             return False
 
-        # Prüfe ob App bereits läuft
-        if adb.is_app_running("com.danfoss.linkapp"):
-            logger.info("launch_app: Danfoss Link App läuft bereits – kein Start nötig")
+        if not adb.is_app_installed(DANFOSS_APP_PACKAGE):
+            message = (
+                "Danfoss Link app is not installed on the Android device. "
+                "Please install the app and start DanfossLink2Mqtt again."
+            )
+            install_hint = (
+                "Install hint: run `adb install -r \"Danfoss.apk\"` from the project root "
+                "or replace `Danfoss.apk` with the full path to your APK file. Start the app and enter pairing code before continuing."
+            )
+            logger.error(f"launch_app: {message}")
+            logger.error(f"launch_app: {install_hint}")
+            if mqtt:
+                mqtt.publish("status/error", f"{message} {install_hint}", retain=True)
+            return False
+
+        # Check if app is already running
+        if adb.is_app_running(DANFOSS_APP_PACKAGE):
+            logger.info("launch_app: Danfoss Link app is already running – no start needed")
             return True
 
-        logger.info("launch_app: Starte Danfoss Link App (SplashActivity)...")
+        logger.info("launch_app: Starting Danfoss Link app (SplashActivity)...")
         adb.start_activity(
-            "com.danfoss.linkapp",
+            DANFOSS_APP_PACKAGE,
             "com.danfoss.cumulus.app.firstuse.SplashActivity"
         )
-        # Warte bis App geladen ist
+        # Wait for app to load
         time.sleep(10.0)
-        # Fehlerdialog automatisch bestätigen (android:id/button1)
+        # Automatically dismiss error dialog (android:id/button1)
         if ui_parser:
             ui_parser.dismiss_error_dialog()
         time.sleep(3.0)
-        logger.info("launch_app: App gestartet")
+        logger.info("launch_app: App started")
         return True
 
-
     def _tap_rooms_button(self) -> bool:
-        """Wechselt per main_rooms_button in die Raum-Uebersicht.
-        Falls der Button nicht gefunden wird, wird die App via SplashActivity neu gestartet.
+        """Switch to room overview via main_rooms_button.
+        If the button is not found, the app is restarted via SplashActivity.
         """
         adb = self.adb
         ui_parser = self.ui_parser
@@ -158,39 +175,39 @@ class DanfossLink2MQTT:
         bounds = ui_parser.get_bounds(rooms_button_res_id)
         if not bounds:
             logger.warning(
-                "rooms_button: main_rooms_button nicht gefunden – stoppe und starte App neu: "
+                "rooms_button: main_rooms_button not found – stopping and restarting app: "
                 "am start -n com.danfoss.linkapp/com.danfoss.cumulus.app.firstuse.SplashActivity"
             )
-            # App zuerst sauber beenden
+            # Stop app cleanly first
             adb.stop_app("com.danfoss.linkapp")
             time.sleep(1.0)
-            # Gleiche Prozedur wie app/start: SplashActivity + Fehlerdialog bestätigen
+            # Same procedure as app/start: SplashActivity + dismiss error dialog
             self._launch_danfoss_app()
-            # Prüfe ob rooms_button jetzt sichtbar ist
+            # Check if rooms_button is now visible
             bounds = ui_parser.get_bounds(rooms_button_res_id)
             if bounds:
                 x = (bounds["x1"] + bounds["x2"]) // 2
                 y = (bounds["y1"] + bounds["y2"]) // 2
-                logger.info(f"rooms_button: Tippe main_rooms_button nach App-Restart bei {x},{y}")
+                logger.info(f"rooms_button: tapping main_rooms_button after app restart at {x},{y}")
                 adb.send_tap(x, y)
                 time.sleep(0.6)
             else:
-                logger.info("rooms_button: App gestartet, rooms_button noch nicht sichtbar (Splash läuft noch)")
+                logger.info("rooms_button: app started, rooms_button not yet visible (splash still running)")
             return True
 
         x = (bounds["x1"] + bounds["x2"]) // 2
         y = (bounds["y1"] + bounds["y2"]) // 2
-        logger.info(f"rooms_button: Tippe main_rooms_button bei {x},{y}")
+        logger.info(f"rooms_button: tapping main_rooms_button at {x},{y}")
         adb.send_tap(x, y)
         time.sleep(0.6)
         return True
 
     def _handle_set_temperature(self, payload: str) -> None:
         """
-        Setzt den Sollwert eines Raums via Swipe auf dem Danfoss-Spinner.
+        Set the setpoint of a room via swipe on the Danfoss spinner.
 
-        Erwartet JSON-Payload: {"room": "<slug>", "temperature": <float>}
-        Beispiel: {"room": "living_room", "temperature": 21.5}
+        Expected JSON payload: {"room": "<slug>", "temperature": <float>}
+        Example: {"room": "living_room", "temperature": 21.5}
         """
         import json as _json
 
@@ -200,7 +217,7 @@ class DanfossLink2MQTT:
         mqtt = self.mqtt
 
         if not adb or not ui_parser or not ui_config or not mqtt:
-            logger.error("set_temperature: Anwendung nicht vollstaendig initialisiert")
+            logger.error("set_temperature: application not fully initialized")
             return
 
         try:
@@ -208,48 +225,48 @@ class DanfossLink2MQTT:
             room_slug: str = str(data.get("room", "")).strip()
             target_temp: float = float(data["temperature"])
         except Exception as e:
-            logger.error(f"set_temperature: Ungueltige Payload '{payload}': {e}")
+            logger.error(f"set_temperature: invalid payload '{payload}': {e}")
             return
 
         max_temp_limit = 26.0
         if target_temp > max_temp_limit:
             logger.warning(
-                f"set_temperature: Ziel {target_temp}°C ueber Limit, begrenze auf {max_temp_limit}°C"
+                f"set_temperature: target {target_temp}°C above limit, capping at {max_temp_limit}°C"
             )
             target_temp = max_temp_limit
 
         if not room_slug:
-            logger.error("set_temperature: 'room' fehlt in Payload")
+            logger.error("set_temperature: 'room' missing in payload")
             return
 
         package_name = DANFOSS_APP_PACKAGE
         edit_res_id = f"{package_name}:id/roomoverview_edit_button"
 
-        # 1) Edit-Button Position ermitteln
+        # 1) Locate edit button position
         edit_bounds = ui_parser.get_bounds(edit_res_id)
         if not edit_bounds:
-            logger.error(f"set_temperature: Edit-Button nicht gefunden ({edit_res_id})")
+            logger.error(f"set_temperature: edit button not found ({edit_res_id})")
             return
 
         ex = (edit_bounds["x1"] + edit_bounds["x2"]) // 2
         ey = (edit_bounds["y1"] + edit_bounds["y2"]) // 2
-        logger.info(f"set_temperature: Edit-Button bei {ex},{ey}")
+        logger.info(f"set_temperature: edit button at {ex},{ey}")
 
-        # 2) Schritte berechnen (0.5°C pro Schritt)
+        # 2) Calculate steps (0.5°C per step)
         step_size = 0.5
-        tolerance = 0.45  # Werte im Dump sind 0.5er Schritte
+        tolerance = 0.45  # Values in dump are in 0.5 steps
         max_iterations = 10
         burst_steps = max(1, int(ui_config.get_setting("set_temperature_burst_steps", 3)))
 
         inter_step_delay_s = float(ui_config.get_setting("set_temperature_swipe_pause_s", 2.0))
         readback_delay_s = float(ui_config.get_setting("set_temperature_readback_delay_s", 1.5))
 
-        # Edit-Button vor jedem einzelnen 0,5°C-Schritt antippen.
+        # Tap edit button before each 0.5°C step.
         def tap_edit_button() -> None:
             adb.send_tap(ex, ey)
             time.sleep(0.1)
 
-        # 3) Solange in Bursts stellen, bis Readback den Sollwert erreicht.
+        # 3) Adjust in bursts until readback reaches target setpoint.
         reached = False
         last_setpoint: Optional[float] = None
         recovery_attempted = False
@@ -259,11 +276,11 @@ class DanfossLink2MQTT:
                 if not recovery_attempted and self._tap_rooms_button():
                     recovery_attempted = True
                     logger.warning(
-                        "set_temperature: Kein Spinner gefunden, Rooms-Ansicht geoeffnet und Retry"
+                        "set_temperature: no spinner found, opened rooms view and retrying"
                     )
                     continue
 
-                logger.error(f"set_temperature: Spinner fuer '{room_slug}' nicht mehr gefunden")
+                logger.error(f"set_temperature: spinner for '{room_slug}' no longer found")
                 break
 
             current_setpoint: Optional[float] = spinner_info.get("setpoint_c")
@@ -271,34 +288,34 @@ class DanfossLink2MQTT:
                 if not recovery_attempted and self._tap_rooms_button():
                     recovery_attempted = True
                     logger.warning(
-                        "set_temperature: Sollwert nicht parsebar, Rooms-Ansicht geoeffnet und Retry"
+                        "set_temperature: setpoint not parseable, opened rooms view and retrying"
                     )
                     continue
 
-                logger.error(f"set_temperature: Aktueller Sollwert fuer '{room_slug}' unbekannt")
+                logger.error(f"set_temperature: current setpoint for '{room_slug}' unknown")
                 break
 
             last_setpoint = current_setpoint
             diff = target_temp - current_setpoint
             if abs(diff) <= tolerance:
                 reached = True
-                logger.info(f"set_temperature: Ziel erreicht ({current_setpoint}°C)")
+                logger.info(f"set_temperature: target reached ({current_setpoint}°C)")
                 break
 
             cx: int = int(spinner_info["center_x"])
             cy: int = int(spinner_info["center_y"])
             step_px: int = int(spinner_info["step_px"])
-            swipe_direction = -1 if diff > 0 else 1  # hoch = waermer
+            swipe_direction = -1 if diff > 0 else 1  # up = warmer
 
             remaining_steps = abs(round(diff / step_size))
             planned_steps = max(1, min(remaining_steps, burst_steps))
             logger.info(
-                f"set_temperature: Burst {step + 1}: {current_setpoint}°C -> {target_temp}°C, "
-                f"{planned_steps} Schritt(e)"
+                f"set_temperature: burst {step + 1}: {current_setpoint}°C -> {target_temp}°C, "
+                f"{planned_steps} step(s)"
             )
 
             tap_edit_button()
-            # Ein langer Swipe kann mehrere 0.5°C-Schritte in einem Zug abbilden.
+            # A long swipe can cover multiple 0.5°C steps in one go.
             total_dy = swipe_direction * step_px * planned_steps
             swipe_duration_ms = max(220, int(220 * planned_steps))
             adb.send_swipe(cx, cy, cx, cy + total_dy, duration_ms=swipe_duration_ms)
@@ -306,26 +323,26 @@ class DanfossLink2MQTT:
             if planned_steps > 1:
                 time.sleep(inter_step_delay_s)
 
-            # Nach dem Burst kurz warten und dann Sollwert per frischem Dump lesen.
+            # Short wait after burst then read setpoint via fresh dump.
             time.sleep(readback_delay_s)
 
-        # 4) Status publizieren
+        # 4) Publish status
         if reached:
             mqtt.publish(f"thermostats/{room_slug}/setpoint", target_temp)
             mqtt.publish(f"thermostats/{room_slug}/setpoint_set_at", int(time.time()))
-            logger.info(f"set_temperature: '{room_slug}' Sollwert auf {target_temp}°C gesetzt")
+            logger.info(f"set_temperature: '{room_slug}' setpoint set to {target_temp}°C")
         else:
             mqtt.publish(
                 f"thermostats/{room_slug}/setpoint_error",
                 f"target={target_temp}, last={last_setpoint}"
             )
             logger.warning(
-                f"set_temperature: Ziel ggf. nicht erreicht (target={target_temp}, last={last_setpoint})"
+                f"set_temperature: target possibly not reached (target={target_temp}, last={last_setpoint})"
             )
 
     @staticmethod
     def _to_float(value: Any) -> Optional[float]:
-        """Konvertiert numerische Werte robust in float (unterstützt auch Dezimalkomma)."""
+        """Robustly convert numeric values to float (supports decimal comma)."""
         if value is None:
             return None
         if isinstance(value, (int, float)):
@@ -342,13 +359,13 @@ class DanfossLink2MQTT:
 
     @staticmethod
     def _derive_hvac_action(current_temp: Optional[float], target_temp: Optional[float]) -> Optional[str]:
-        """Leitet hvac_action aus Ist-/Sollwert ab."""
+        """Derive hvac_action from current/target temperature."""
         if current_temp is None or target_temp is None:
             return None
         return "idle" if target_temp < current_temp else "heating"
 
     def _publish_danfoss_thermostats(self, force: bool = False) -> None:
-        """Analysiert den UI-Dump und publiziert Thermostatnamen und Werte."""
+        """Analyse the UI dump and publish thermostat names and values."""
         if not self.ui_parser or not self.ui_config or not self.mqtt:
             return
 
@@ -359,7 +376,7 @@ class DanfossLink2MQTT:
             None
         )
         if not extractor:
-            logger.warning("UI parser unterstuetzt keine Danfoss-Thermostat-Extraktion")
+            logger.warning("UI parser does not support Danfoss thermostat extraction")
             return
 
         thermostats = extractor(package_name, use_cache=not force)
@@ -368,7 +385,7 @@ class DanfossLink2MQTT:
                 thermostats = extractor(package_name, use_cache=False)
 
         if not thermostats:
-            logger.debug("Keine Danfoss-Thermostate im aktuellen UI-Dump erkannt")
+            logger.debug("No Danfoss thermostats detected in current UI dump")
             return
 
         thermostats_payload: List[Dict[str, Any]] = []
@@ -383,7 +400,7 @@ class DanfossLink2MQTT:
             self.mqtt.publish(f"{base_topic}/value", thermostat.get("temperature_c", ""))
             self.mqtt.publish(f"{base_topic}/setpoint", thermostat.get("setpoint_c", ""))
 
-            # HVAC-Action aus Soll-/Istwert ableiten: setpoint < value -> idle, sonst heating.
+            # Derive hvac_action from setpoint/current: setpoint < value -> idle, else heating.
             current_temp = self._to_float(thermostat.get("temperature_c"))
             target_temp = self._to_float(thermostat.get("setpoint_c"))
             hvac_action = self._derive_hvac_action(current_temp, target_temp)
@@ -405,7 +422,7 @@ class DanfossLink2MQTT:
         self._publish_homeassistant_discovery(thermostats_payload)
 
     def _publish_homeassistant_discovery(self, thermostats: List[Dict[str, Any]]) -> None:
-        """Publiziert MQTT-Discovery fuer Home Assistant Climate-Entitaeten je Raum."""
+        """Publish MQTT discovery for Home Assistant climate entities per room."""
         if not self.mqtt or not self.ui_config:
             return
 
@@ -447,11 +464,14 @@ class DanfossLink2MQTT:
                 "current_temperature_topic": f"{base_state}/value",
                 "mode_state_topic": f"{base_state}/mode",
                 "action_topic": f"{base_state}/hvac_action",
+                "availability_topic": f"{MQTT_TOPIC_BASE}/status",
+                "payload_available": "online",
+                "payload_not_available": "offline",
                 "modes": ["heat"],
                 "min_temp": float(self.ui_config.get_setting("thermostat_min_temp", 5.0)),
                 "max_temp": float(self.ui_config.get_setting("thermostat_max_temp", 30.0)),
                 "temp_step": float(self.ui_config.get_setting("thermostat_temp_step", 0.5)),
-                "precision": 0.5,
+                "precision": 0.1,
                 "device": device
             }
             self.mqtt.publish_absolute(climate_config_topic, climate_payload, retain=True)
@@ -459,39 +479,38 @@ class DanfossLink2MQTT:
             self.discovery_registry.add(room_key)
 
     def poll_data(self) -> None:
-        """Pollt Sensor- und UI-Daten vom Android-Gerät"""
-        logger.info(f"Starte Daten-Polling alle {POLL_INTERVAL} Sekunden...")
+        """Poll sensor and UI data from the Android device"""
+        logger.info(f"Starting data polling every {POLL_INTERVAL} seconds...")
         if not self.adb or not self.mqtt:
-            logger.error("Polling ohne initialisierte ADB/MQTT Instanzen abgebrochen")
+            logger.error("Polling aborted: ADB/MQTT not initialized")
             return
 
         while self.running:
             try:
-                # Sicherstellen dass ADB verbunden ist
+                # Ensure ADB is connected
                 if not self.adb.ensure_connected():
-                    logger.error("Polling: ADB-Neuverbindung fehlgeschlagen – warte 10s")
+                    logger.error("Polling: ADB reconnect failed – waiting 10s")
                     time.sleep(10)
                     continue
 
-                # Lese UIAutomator-Daten
+                # Read UIAutomator data
                 self._poll_ui_data(force=False)
 
-                # Veröffentliche Danfoss-Thermostatdaten aus UI-Dump-Analyse
+                # Publish Danfoss thermostat data from UI dump analysis
                 self._publish_danfoss_thermostats(force=False)
 
                 time.sleep(POLL_INTERVAL)
 
             except Exception as e:
-                logger.error(f"Fehler beim Polling: {e}")
+                logger.error(f"Polling error: {e}")
                 time.sleep(5)
-
 
     def _poll_ui_data(self, force: bool = False) -> None:
         """
-        Pollt UIAutomator-Daten
+        Poll UIAutomator data.
 
         Args:
-            force: Erzwinge Update auch wenn gecacht
+            force: Force update even when cached
         """
         try:
             if not self.ui_config or not self.ui_parser:
@@ -500,13 +519,13 @@ class DanfossLink2MQTT:
             ui_config = self.ui_config
             ui_parser = self.ui_parser
 
-            # Hole aktivierte Elemente
+            # Get enabled elements
             elements = ui_config.get_enabled_elements()
 
             if not elements:
                 return
 
-            logger.debug(f"Polling {len(elements)} UI-Elemente...")
+            logger.debug(f"Polling {len(elements)} UI elements...")
 
             for element_name, element_config in elements.items():
                 try:
@@ -520,14 +539,14 @@ class DanfossLink2MQTT:
                     resource_id = str(resource_id)
                     mqtt_topic = str(mqtt_topic)
 
-                    # Extrahiere Wert
+                    # Extract value
                     value = ui_parser.extract_value_by_resource_id(
                         resource_id,
                         value_type
                     )
 
                     if value is not None:
-                        # Überprüfe auf Änderungen wenn konfiguriert
+                        # Check for changes if configured
                         publish_only_changes = ui_config.get_setting(
                             "publish_only_changes",
                             True
@@ -536,31 +555,31 @@ class DanfossLink2MQTT:
                         if publish_only_changes:
                             if ui_parser.is_value_changed(element_name, value):
                                 self.mqtt.publish(mqtt_topic, value)
-                                logger.debug(f"UI-Wert publiziert: {mqtt_topic} = {value}")
+                                logger.debug(f"UI value published: {mqtt_topic} = {value}")
                         else:
                             self.mqtt.publish(mqtt_topic, value)
-                            logger.debug(f"UI-Wert publiziert: {mqtt_topic} = {value}")
+                            logger.debug(f"UI value published: {mqtt_topic} = {value}")
 
                 except Exception as e:
-                    logger.warning(f"Fehler beim Polling von {element_name}: {e}")
+                    logger.warning(f"Error polling {element_name}: {e}")
 
         except Exception as e:
-            logger.error(f"Fehler beim UI-Polling: {e}")
+            logger.error(f"UI polling error: {e}")
 
     def run(self) -> None:
-        """Startet die Hauptschleife"""
+        """Start the main loop"""
         if not self.initialize():
-            logger.error("Initialisierung fehlgeschlagen")
+            logger.error("Initialization failed")
             return
 
         self.running = True
-        logger.info("Starte Hauptschleife...")
+        logger.info("Starting main loop...")
 
-        # Starte Polling in separatem Thread
+        # Start polling in a separate thread
         self.polling_thread = threading.Thread(target=self.poll_data, daemon=True)
         self.polling_thread.start()
 
-        # Hauptthread bleibt aktiv
+        # Keep main thread alive
         try:
             while self.running:
                 time.sleep(1)
@@ -568,11 +587,11 @@ class DanfossLink2MQTT:
             self.stop()
 
     def stop(self) -> None:
-        """Stoppt die Anwendung"""
-        logger.info("Stoppe DanfossLink2Mqtt...")
+        """Stop the application"""
+        logger.info("Stopping DanfossLink2Mqtt...")
         self.running = False
 
-        # Warte auf Polling-Thread
+        # Wait for polling thread
         if self.polling_thread and self.polling_thread.is_alive():
             self.polling_thread.join(timeout=5)
 
@@ -582,14 +601,13 @@ class DanfossLink2MQTT:
         if self.mqtt:
             self.mqtt.disconnect()
 
-        logger.info("Anwendung gestoppt")
+        logger.info("Application stopped")
 
 
 def main():
-    """Einstiegspunkt"""
+    """Entry point"""
     app = DanfossLink2MQTT()
     app.run()
-
 
 
 if __name__ == "__main__":

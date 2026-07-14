@@ -1,4 +1,4 @@
-"""MQTT-Bridge für die Bereitstellung von ADB-Daten"""
+"""MQTT bridge for publishing ADB data via MQTT"""
 import logging
 import json
 import time
@@ -9,19 +9,19 @@ logger = logging.getLogger(__name__)
 
 
 class MQTTBridge:
-    """MQTT-Bridge zur Kommunikation mit ADB-Daten"""
-    
+    """MQTT bridge for communication with ADB data"""
+
     def __init__(self, broker: str, port: int, username: str = "", password: str = "",
                  topic_base: str = "DanfossLink2Mqtt"):
         """
-        Initialisiert die MQTT-Bridge
-        
+        Initializes the MQTT bridge.
+
         Args:
-            broker: MQTT Broker Adresse
-            port: MQTT Broker Port
-            username: MQTT Benutzername (optional)
-            password: MQTT Passwort (optional)
-            topic_base: Basis-Topic für alle veröffentlichten Daten
+            broker: MQTT broker address
+            port: MQTT broker port
+            username: MQTT username (optional)
+            password: MQTT password (optional)
+            topic_base: Base topic for all published data
         """
         self.broker = broker
         self.port = port
@@ -31,124 +31,133 @@ class MQTTBridge:
         self.client = mqtt.Client(client_id="DanfossLink2Mqtt")
         self.connected = False
         self.callbacks: Dict[str, Callable] = {}
-        
-        # Setze Callbacks
+
+        # Set callbacks
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
         self.client.on_publish = self._on_publish
-    
+
     def connect(self) -> bool:
-        """Verbindung zum MQTT Broker herstellen"""
+        """Establish connection to the MQTT broker"""
         try:
             if self.username and self.password:
                 self.client.username_pw_set(self.username, self.password)
-            
-            logger.info(f"Verbinde mit MQTT Broker: {self.broker}:{self.port}")
+
+            # Set Last Will Testament (LWT) message
+            lwt_topic = f"{self.topic_base}/status"
+            self.client.will_set(lwt_topic, "offline", qos=1, retain=True)
+            logger.debug(f"LWT configured: {lwt_topic} = 'offline'")
+
+            logger.info(f"Connecting to MQTT broker: {self.broker}:{self.port}")
             self.client.connect(self.broker, self.port, keepalive=60)
             self.client.loop_start()
-            
-            # Warte auf Verbindung
+
+            # Wait for connection
             timeout = time.time() + 10
             while not self.connected and time.time() < timeout:
                 time.sleep(0.1)
-            
+
             if self.connected:
-                logger.info("Erfolgreich mit MQTT Broker verbunden")
+                logger.info("Successfully connected to MQTT broker")
                 return True
             else:
-                logger.error("MQTT Verbindung Timeout")
+                logger.error("MQTT connection timeout")
                 return False
         except Exception as e:
-            logger.error(f"MQTT Verbindungsfehler: {e}")
+            logger.error(f"MQTT connection error: {e}")
             return False
-    
+
     def disconnect(self) -> None:
-        """Verbindung zum MQTT Broker trennen"""
+        """Disconnect from the MQTT broker"""
         try:
             self.client.loop_stop()
             self.client.disconnect()
-            logger.info("MQTT Verbindung getrennt")
+            logger.info("MQTT connection closed")
         except Exception as e:
-            logger.error(f"Fehler beim Trennen der MQTT-Verbindung: {e}")
-    
+            logger.error(f"Error closing MQTT connection: {e}")
+
     def _on_connect(self, client, userdata, flags, rc):
-        """Callback bei Verbindung"""
+        """Callback on connection"""
         if rc == 0:
             self.connected = True
-            logger.info("MQTT Broker verbunden")
-            # Abonniere Steuerbefehle
+            logger.info("MQTT broker connected")
+            # Publish online status
+            online_topic = f"{self.topic_base}/status"
+            self.client.publish(online_topic, "online", qos=1, retain=True)
+            logger.debug(f"Published online status: {online_topic} = 'online'")
+            # Subscribe to command topics
             command_topic = f"{self.topic_base}/command/#"
             self.client.subscribe(command_topic)
-            logger.info(f"Abonniert: {command_topic}")
+            logger.info(f"Subscribed: {command_topic}")
         else:
-            logger.error(f"MQTT Verbindung fehlgeschlagen mit Code {rc}")
-    
+            logger.error(f"MQTT connection failed with code {rc}")
+
     def _on_disconnect(self, client, userdata, rc):
-        """Callback bei Trennung"""
+        """Callback on disconnect"""
         self.connected = False
         if rc != 0:
-            logger.warning(f"Unerwartete Trennung mit Code {rc}")
-    
+            logger.warning(f"Unexpected disconnect with code {rc} – Last Will Testament will be published")
+
     def _on_message(self, client, userdata, msg):
-        """Callback für eingehende Nachrichten"""
+        """Callback for incoming messages"""
         topic = msg.topic
         payload = msg.payload.decode('utf-8', errors='ignore')
-        
-        logger.debug(f"MQTT Nachricht empfangen: {topic} = {payload}")
-        
-        # Extrahiere Befehlstyp aus Topic
+
+        logger.debug(f"MQTT message received: {topic} = {payload}")
+
+        # Extract command type from topic
         parts = topic.split('/')
         if len(parts) >= 3 and parts[0] == self.topic_base.split('/')[0]:
             command_type = '/'.join(parts[2:])
-            
+
             if command_type in self.callbacks:
                 try:
                     self.callbacks[command_type](payload)
                 except Exception as e:
-                    logger.error(f"Fehler beim Verarbeiten des Befehls '{command_type}': {e}")
-    
+                    logger.error(f"Error processing command '{command_type}': {e}")
+
     def _on_publish(self, client, userdata, mid):
-        """Callback nach Veröffentlichung"""
-        logger.debug(f"Nachricht veröffentlicht (MID: {mid})")
-    
+        """Callback after publish"""
+        logger.debug(f"Message published (MID: {mid})")
+
     def publish(self, topic_suffix: str, payload: Any, retain: bool = False, qos: int = 1) -> bool:
         """
-        Veröffentlicht eine Nachricht
-        
+        Publish a message.
+
         Args:
-            topic_suffix: Suffix für den vollständigen Topic
-            payload: Die zu veröffentlichende Nachricht
-            retain: Ob die Nachricht behalten werden soll
+            topic_suffix: Suffix for the full topic
+            payload: The message to publish
+            retain: Whether the message should be retained
             qos: Quality of Service (0, 1, 2)
-            
+
         Returns:
-            True bei Erfolg, False bei Fehler
+            True on success, False on error
         """
         if not self.connected:
-            logger.warning("Nicht mit MQTT verbunden")
+            logger.warning("Not connected to MQTT")
             return False
-        
+
         try:
             full_topic = f"{self.topic_base}/{topic_suffix}"
-            
-            # Konvertiere Payload zu JSON wenn nötig
+
+            # Convert payload to JSON if necessary
             if isinstance(payload, (dict, list)):
                 payload_str = json.dumps(payload)
             else:
                 payload_str = str(payload)
-            
+
             self.client.publish(full_topic, payload_str, retain=retain, qos=qos)
-            logger.debug(f"Veröffentlicht: {full_topic} = {payload_str}")
+            logger.debug(f"Published: {full_topic} = {payload_str}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim Veröffentlichen: {e}")
+            logger.error(f"Error publishing: {e}")
             return False
 
     def publish_absolute(self, topic: str, payload: Any, retain: bool = False, qos: int = 1) -> bool:
-        """Veröffentlicht auf einem absoluten Topic ohne topic_base-Präfix."""
+        """Publish to an absolute topic without topic_base prefix."""
         if not self.connected:
-            logger.warning("Nicht mit MQTT verbunden")
+            logger.warning("Not connected to MQTT")
             return False
 
         try:
@@ -158,24 +167,23 @@ class MQTTBridge:
                 payload_str = str(payload)
 
             self.client.publish(topic, payload_str, retain=retain, qos=qos)
-            logger.debug(f"Veröffentlicht (absolut): {topic} = {payload_str}")
+            logger.debug(f"Published (absolute): {topic} = {payload_str}")
             return True
         except Exception as e:
-            logger.error(f"Fehler beim absoluten Veröffentlichen: {e}")
+            logger.error(f"Error publishing to absolute topic: {e}")
             return False
 
     def register_command_handler(self, command_name: str, handler: Callable) -> None:
         """
-        Registriert einen Handler für einen Befehl
-        
+        Register a handler for a command.
+
         Args:
-            command_name: Der Befehlsname
-            handler: Die Callback-Funktion
+            command_name: The command name
+            handler: The callback function
         """
         self.callbacks[command_name] = handler
-        logger.info(f"Befehl-Handler registriert: {command_name}")
-    
-    def is_connected(self) -> bool:
-        """Gibt zurück, ob verbunden ist"""
-        return self.connected
+        logger.info(f"Command handler registered: {command_name}")
 
+    def is_connected(self) -> bool:
+        """Return whether the client is connected"""
+        return self.connected

@@ -1,4 +1,4 @@
-"""UIAutomator XML Parser für ADB-basierte UI-Automation"""
+"""UIAutomator XML parser for ADB-based UI automation"""
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -11,30 +11,30 @@ logger = logging.getLogger(__name__)
 
 
 class UIAutomatorParser:
-    """Parst XMLDump von UIAutomator und extrahiert Werte basierend auf resource-ids"""
-    
+    """Parses XML dump from UIAutomator and extracts values based on resource-ids"""
+
     def __init__(self, adb: ADBController):
         """
-        Initialisiert den UIAutomator Parser
-        
+        Initializes the UIAutomator parser.
+
         Args:
-            adb: ADBController Instanz
+            adb: ADBController instance
         """
         self.adb = adb
         self.last_xml = None
         self.last_xml_time = None
-        self.cache_duration = 5  # Sekunden
+        self.cache_duration = 5  # seconds
         self.cached_values = {}
-        self.last_values = {}  # Für Change-Detection
+        self.last_values = {}  # For change detection
 
     def _extract_xml_payload(self, raw_output: str) -> Optional[str]:
-        """Extrahiert das reine XML-Dokument aus UIAutomator-Shell-Output."""
+        """Extracts the pure XML document from UIAutomator shell output."""
         if not raw_output:
             return None
 
         cleaned = raw_output.replace("\x00", "").strip()
 
-        # UIAutomator hängt je nach Android-Version oft Status-Text vor/nach XML an.
+        # UIAutomator sometimes prepends/appends status text around the XML.
         match = re.search(r"<hierarchy[^>]*>.*?</hierarchy>", cleaned, re.DOTALL)
         if match:
             return match.group(0).strip()
@@ -52,7 +52,7 @@ class UIAutomatorParser:
         return None
 
     def _get_xml_root(self, use_cache: bool = True) -> Optional[ET.Element]:
-        """Lädt den XML-Dump und liefert den geparsten Root-Knoten zurück."""
+        """Load the XML dump and return the parsed root element."""
         xml_str = self.get_ui_dump(use_cache=use_cache)
         if not xml_str:
             return None
@@ -60,102 +60,100 @@ class UIAutomatorParser:
         try:
             return ET.fromstring(xml_str)
         except ET.ParseError as e:
-            logger.error(f"XML Parse-Fehler: {e}")
+            logger.error(f"XML parse error: {e}")
             return None
-    
+
     def get_ui_dump(self, use_cache: bool = True) -> Optional[str]:
         """
-        Holt den aktuellen UI-Dump vom Android-Gerät
-        
+        Fetch the current UI dump from the Android device.
+
         Args:
-            use_cache: Benutze gecachte Daten wenn verfügbar
-            
+            use_cache: Use cached data if available
+
         Returns:
-            XML-String oder None bei Fehler
+            XML string or None on error
         """
-        # Überprüfe Cache
+        # Check cache
         if use_cache and self.last_xml and self.last_xml_time:
             age = datetime.now() - self.last_xml_time
             if age.total_seconds() < self.cache_duration:
-                logger.debug(f"UIAutomator Cache verwendet (Alter: {age.total_seconds():.1f}s)")
+                logger.debug(f"UIAutomator cache used (age: {age.total_seconds():.1f}s)")
                 return self.last_xml
-        
+
         try:
-            logger.debug("Hole UI-Dump von UIAutomator...")
-            # UIAutomator Befehl
+            logger.debug("Fetching UI dump from UIAutomator...")
             result = self.adb.shell_command("uiautomator dump /dev/stdout")
-            
+
             if result:
                 xml_payload = self._extract_xml_payload(result)
                 if not xml_payload:
-                    logger.error("Konnte kein gueltiges UIAutomator-XML im Shell-Output finden")
+                    logger.error("Could not find valid UIAutomator XML in shell output")
                     return None
 
                 self.last_xml = xml_payload
                 self.last_xml_time = datetime.now()
-                logger.debug(f"UI-Dump erhalten ({len(xml_payload)} Bytes)")
+                logger.debug(f"UI dump received ({len(xml_payload)} bytes)")
                 return xml_payload
             else:
-                logger.error("UIAutomator Dump ist leer")
+                logger.error("UIAutomator dump is empty")
                 return None
         except Exception as e:
-            logger.error(f"Fehler beim Abrufen des UI-Dumps: {e}")
+            logger.error(f"Error fetching UI dump: {e}")
             return None
-    
+
     def save_ui_dump(self, filepath: str = "ui_dump.xml") -> bool:
         """
-        Speichert den UI-Dump lokal als XML-Datei zum Debugging
-        
+        Save the UI dump locally as an XML file for debugging.
+
         Args:
-            filepath: Zielpath (lokal auf dem Computer, z.B. "ui_dump.xml" oder "C:\\Users\\user\\Downloads\\dump.xml")
-            
+            filepath: Local file path (e.g. "ui_dump.xml")
+
         Returns:
-            True bei Erfolg
+            True on success
         """
         try:
             xml_data = self.get_ui_dump(use_cache=False)
             if xml_data:
-                # Speichere lokal auf dem Computer
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write(xml_data)
-                logger.info(f"UI-Dump gespeichert: {filepath}")
+                logger.info(f"UI dump saved: {filepath}")
                 return True
             else:
-                logger.error("Konnte XML-Daten nicht abrufen")
+                logger.error("Could not retrieve XML data")
         except Exception as e:
-            logger.error(f"Fehler beim Speichern des UI-Dumps: {e}")
-        
+            logger.error(f"Error saving UI dump: {e}")
+
         return False
-    
+
     def extract_value_by_resource_id(self, resource_id: str, value_type: str = "text") -> Optional[str]:
         """
-        Extrahiert einen Wert basierend auf resource-id
-        
+        Extract a value based on resource-id.
+
         Args:
-            resource_id: Die resource-id (z.B. "com.android.systemui:id/clock")
-            value_type: Art des auszulesenden Wertes:
-                - text: Text-Inhalt des Elements
-                - content-desc: content-description Attribut
-                - checked: Wert des checked Attributs
-                - selected: Wert des selected Attributs
-                - enabled: Wert des enabled Attributs
-                - bounds: Position des Elements
-                
+            resource_id: The resource-id (e.g. "com.android.systemui:id/clock")
+            value_type: Type of value to read:
+                - text: text content of the element
+                - content-desc: content-description attribute
+                - checked: value of the checked attribute
+                - selected: value of the selected attribute
+                - enabled: value of the enabled attribute
+                - bounds: position of the element
+
         Returns:
-            Der extrahierte Wert oder None
+            The extracted value or None
         """
         try:
             root = self._get_xml_root()
             if root is None:
                 return None
-            
-            # Suche Element mit matching resource-id
+
+            # Find element with matching resource-id
             for elem in root.iter():
                 res_id = elem.get("resource-id", "")
                 if res_id == resource_id:
-                    logger.debug(f"Element gefunden: {resource_id}")
-                    
-                    # Extrahiere gewünschten Wert-Typ
+                    logger.debug(f"Element found: {resource_id}")
+
+                    # Extract requested value type
                     if value_type == "text":
                         value = elem.get("text", "")
                     elif value_type == "content-desc":
@@ -170,34 +168,34 @@ class UIAutomatorParser:
                         value = elem.get("bounds", "")
                     else:
                         value = elem.get(value_type, "")
-                    
-                    logger.debug(f"Wert extrahiert ({value_type}): {value}")
+
+                    logger.debug(f"Value extracted ({value_type}): {value}")
                     return value if value else None
-            
-            logger.warning(f"Element mit resource-id nicht gefunden: {resource_id}")
+
+            logger.warning(f"Element with resource-id not found: {resource_id}")
             return None
-        
+
         except Exception as e:
-            logger.error(f"Fehler beim Extrahieren des Wertes: {e}")
+            logger.error(f"Error extracting value: {e}")
             return None
-    
+
     def extract_multiple_by_class(self, class_name: str) -> List[Dict[str, str]]:
         """
-        Extrahiert mehrere Elemente basierend auf Klasse
-        
+        Extract multiple elements based on class.
+
         Args:
-            class_name: Die Klasse (z.B. "android.widget.TextView")
-            
+            class_name: The class (e.g. "android.widget.TextView")
+
         Returns:
-            Liste von Dictionaries mit Element-Attributen
+            List of dictionaries with element attributes
         """
         results = []
         try:
             root = self._get_xml_root()
             if root is None:
                 return results
-            
-            # Suche alle Elemente mit matching Klasse
+
+            # Find all elements with matching class
             for elem in root.iter():
                 if elem.get("class") == class_name:
                     result = {
@@ -208,31 +206,31 @@ class UIAutomatorParser:
                         "class": class_name
                     }
                     results.append(result)
-            
-            logger.debug(f"{len(results)} Elemente der Klasse '{class_name}' gefunden")
+
+            logger.debug(f"{len(results)} elements of class '{class_name}' found")
             return results
-        
+
         except Exception as e:
-            logger.error(f"Fehler beim Auslesen mehrerer Elemente: {e}")
+            logger.error(f"Error extracting multiple elements: {e}")
             return results
-    
+
     def extract_all_by_package(self, package_name: str) -> List[Dict[str, str]]:
         """
-        Extrahiert alle UI-Elemente eines Packages
-        
+        Extract all UI elements of a package.
+
         Args:
-            package_name: Paketname (z.B. "com.netflix.mediaclient")
-            
+            package_name: Package name (e.g. "com.netflix.mediaclient")
+
         Returns:
-            Liste von Dictionaries mit Element-Attributen
+            List of dictionaries with element attributes
         """
         results = []
         try:
             root = self._get_xml_root()
             if root is None:
                 return results
-            
-            # Suche alle Elemente mit matching package in resource-id
+
+            # Find all elements with matching package in resource-id
             for elem in root.iter():
                 res_id = elem.get("resource-id", "")
                 if res_id.startswith(package_name):
@@ -244,34 +242,34 @@ class UIAutomatorParser:
                         "bounds": elem.get("bounds", "")
                     }
                     results.append(result)
-            
-            logger.debug(f"{len(results)} Elemente des Packages '{package_name}' gefunden")
+
+            logger.debug(f"{len(results)} elements of package '{package_name}' found")
             return results
-        
+
         except Exception as e:
-            logger.error(f"Fehler beim Auslesen von Package-Elementen: {e}")
+            logger.error(f"Error extracting package elements: {e}")
             return results
-    
+
     def find_element_by_text(self, text: str, partial: bool = False) -> Optional[Dict[str, str]]:
         """
-        Findet ein Element basierend auf Text
-        
+        Find an element based on text.
+
         Args:
-            text: Der zu suchende Text
-            partial: Ob Partial-Match erlaubt ist
-            
+            text: The text to search for
+            partial: Whether partial match is allowed
+
         Returns:
-            Dictionary mit Element-Attributen oder None
+            Dictionary with element attributes or None
         """
         try:
             root = self._get_xml_root()
             if root is None:
                 return None
-            
-            # Suche Element mit matching Text
+
+            # Find element with matching text
             for elem in root.iter():
                 elem_text = elem.get("text", "")
-                
+
                 if partial:
                     if text.lower() in elem_text.lower():
                         return {
@@ -288,29 +286,29 @@ class UIAutomatorParser:
                             "class": elem.get("class", ""),
                             "bounds": elem.get("bounds", "")
                         }
-            
-            logger.warning(f"Element mit Text nicht gefunden: {text}")
+
+            logger.warning(f"Element with text not found: {text}")
             return None
-        
+
         except Exception as e:
-            logger.error(f"Fehler beim Suchen nach Text: {e}")
+            logger.error(f"Error searching by text: {e}")
             return None
-    
+
     def get_bounds(self, resource_id: str) -> Optional[Dict[str, int]]:
         """
-        Extrahiert die Bounds/Position eines Elements
-        
+        Extract the bounds/position of an element.
+
         Args:
-            resource_id: Die resource-id
-            
+            resource_id: The resource-id
+
         Returns:
-            Dictionary mit x1, y1, x2, y2 Koordinaten oder None
+            Dictionary with x1, y1, x2, y2 coordinates or None
         """
         try:
             bounds_str = self.extract_value_by_resource_id(resource_id, "bounds")
             if not bounds_str:
                 return None
-            
+
             # Parse format: [x1,y1][x2,y2]
             match = re.search(r'\[(\d+),(\d+)]\[(\d+),(\d+)]', bounds_str)
             if match:
@@ -321,12 +319,12 @@ class UIAutomatorParser:
                     "y2": int(match.group(4))
                 }
         except Exception as e:
-            logger.error(f"Fehler beim Parsen der Bounds: {e}")
-        
+            logger.error(f"Error parsing bounds: {e}")
+
         return None
 
     def _parse_bounds_string(self, bounds_str: str) -> Optional[Dict[str, int]]:
-        """Parst das Android-Bounds-Format [x1,y1][x2,y2]."""
+        """Parse the Android bounds format [x1,y1][x2,y2]."""
         if not bounds_str:
             return None
 
@@ -342,37 +340,79 @@ class UIAutomatorParser:
         }
 
     def _center_from_bounds(self, bounds: Dict[str, int]) -> Tuple[int, int]:
-        """Berechnet den Mittelpunkt fuer Distanzvergleiche."""
+        """Calculate the center point for distance comparisons."""
         return (
             (bounds["x1"] + bounds["x2"]) // 2,
             (bounds["y1"] + bounds["y2"]) // 2
         )
 
     def _parse_temperature(self, value: str) -> Optional[float]:
-        """Extrahiert Temperaturwerte wie '21.5 C' oder '21,5°C'."""
+        """Extract temperature values like '21.5 C', '21,5°C', or '21.25°C'."""
         if not value:
             return None
 
-        match = re.search(r"(-?\d{1,2}(?:[.,]\d)?)\s*°?(?:\s*[Cc])?", value)
+        # Extended regex: allow up to 2 decimal places for more precision
+        match = re.search(r"(-?\d{1,2}(?:[.,]\d{1,2})?)\s*°?(?:\s*[Cc])?", value)
         if not match:
             return None
 
         try:
-            return float(match.group(1).replace(",", "."))
+            parsed = float(match.group(1).replace(",", "."))
+            return parsed
         except ValueError:
             return None
 
     def _slugify(self, text: str) -> str:
-        """Erzeugt MQTT-kompatible Slugs aus UI-Labels."""
+        """Generate MQTT-compatible slugs from UI labels."""
         slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
         return slug or "unknown_zone"
 
+    def _extract_spinner_values_with_indices(self, spinner_elem: Any, package_name: str) -> Tuple[List[Dict[str, Any]], Optional[float]]:
+        """
+        Extract all temperature values and their indices from a spinner element.
+        Returns tuple of (picker_values list, setpoint_c value from index=1).
+
+        The setpoint is always the element with index=1 in the temperature_spinner_wrapper.
+        """
+        wrapper_res_id = f"{package_name}:id/temperature_spinner_wrapper"
+        picker_value_res_id = "android:id/text1"
+        picker_values: List[Dict[str, Any]] = []
+        setpoint_c: Optional[float] = None
+
+        # Iterate through wrapper nodes within the spinner
+        for wrapper in spinner_elem:
+            if wrapper.get("resource-id", "") == wrapper_res_id:
+                wrapper_index_str = wrapper.get("index", "-1")
+                try:
+                    wrapper_index = int(wrapper_index_str)
+                except ValueError:
+                    wrapper_index = -1
+
+                # Find text element within the wrapper
+                for text_elem in wrapper:
+                    if text_elem.get("resource-id", "") == picker_value_res_id:
+                        text_value = text_elem.get("text", "").strip()
+                        if text_value:
+                            temp_c = self._parse_temperature(text_value)
+                            if temp_c is not None:
+                                picker_values.append({
+                                    "raw": text_value,
+                                    "c": temp_c,
+                                    "index": wrapper_index
+                                })
+                                # Setpoint is always at index=1
+                                if wrapper_index == 1:
+                                    setpoint_c = temp_c
+
+        return picker_values, setpoint_c
+
     def get_room_spinner_bounds(self, package_name: str, room_slug: str, use_cache: bool = False) -> Optional[Dict[str, Any]]:
         """
-        Gibt Bounds und aktuellen Sollwert des Temperatur-Spinners fuer einen Raum per Slug zurueck.
+        Return bounds and current setpoint of the temperature spinner for a room by slug.
+        The setpoint is always extracted from index=1 wrapper element.
 
         Returns:
-            Dict mit keys: bounds, center_x, center_y, setpoint_c, step_px
+            Dict with keys: bounds, center_x, center_y, setpoint_c, step_px
         """
         root = self._get_xml_root(use_cache=use_cache)
         if root is None:
@@ -381,7 +421,6 @@ class UIAutomatorParser:
         room_res_id = f"{package_name}:id/roomoverview_room"
         title_res_id = f"{package_name}:id/title"
         spinner_res_id = f"{package_name}:id/adjustable_temp"
-        picker_value_res_id = "android:id/text1"
 
         for room in root.iter():
             if room.get("resource-id", "") != room_res_id:
@@ -396,26 +435,31 @@ class UIAutomatorParser:
             if self._slugify(room_label) != room_slug:
                 continue
 
-            spinner_bounds = None
-            picker_items: List[float] = []
-
+            # Find the spinner element
+            spinner_elem = None
             for elem in room.iter():
-                res_id = elem.get("resource-id", "")
-                if res_id == spinner_res_id:
-                    spinner_bounds = self._parse_bounds_string(elem.get("bounds", ""))
-                elif res_id == picker_value_res_id:
-                    temp_c = self._parse_temperature(elem.get("text", ""))
-                    if temp_c is not None:
-                        picker_items.append(temp_c)
+                if elem.get("resource-id", "") == spinner_res_id:
+                    spinner_elem = elem
+                    break
 
-            if not spinner_bounds or not picker_items:
+            if spinner_elem is None:
+                return None
+
+            # Extract spinner values with indices
+            spinner_bounds = self._parse_bounds_string(spinner_elem.get("bounds", ""))
+            picker_values, setpoint_c = self._extract_spinner_values_with_indices(spinner_elem, package_name)
+
+            if not spinner_bounds or not picker_values:
                 return None
 
             center_x = (spinner_bounds["x1"] + spinner_bounds["x2"]) // 2
             center_y = (spinner_bounds["y1"] + spinner_bounds["y2"]) // 2
-            step_px = (spinner_bounds["y2"] - spinner_bounds["y1"]) // max(len(picker_items), 1)
-            selected_idx = len(picker_items) // 2
-            setpoint_c = picker_items[selected_idx] if picker_items else None
+            step_px = (spinner_bounds["y2"] - spinner_bounds["y1"]) // max(len(picker_values), 1)
+
+            logger.debug(
+                f"get_room_spinner: room='{room_label}' setpoint={setpoint_c}°C "
+                f"picker_items={len(picker_values)} step_px={step_px}"
+            )
 
             return {
                 "bounds": spinner_bounds,
@@ -423,7 +467,7 @@ class UIAutomatorParser:
                 "center_y": center_y,
                 "setpoint_c": setpoint_c,
                 "step_px": step_px,
-                "picker_items": picker_items,
+                "picker_items": [pv["c"] for pv in picker_values],
                 "room_label": room_label
             }
 
@@ -431,10 +475,11 @@ class UIAutomatorParser:
 
     def extract_danfoss_thermostats(self, package_name: str, use_cache: bool = True) -> List[Dict[str, Any]]:
         """
-        Analysiert den UI-Dump der Danfoss-App und erkennt Thermostatwerte mit Bezeichnung.
+        Analyse the Danfoss app UI dump and detect thermostat values with labels.
+        The setpoint is always extracted from index=1 wrapper element in the spinner.
 
         Returns:
-            Liste erkannter Thermostate mit Label, Temperaturwert und resource-id.
+            List of detected thermostats with label, temperature value and resource-id.
         """
         thermostats: List[Dict[str, Any]] = []
         root = self._get_xml_root(use_cache=use_cache)
@@ -446,9 +491,9 @@ class UIAutomatorParser:
         cur_temp_res_id = f"{package_name}:id/cur_temp"
         outdoor_temp_res_id = f"{package_name}:id/outdoor_temp"
         outdoor_title_res_id = f"{package_name}:id/outdoor_title"
-        picker_value_res_id = "android:id/text1"
+        spinner_res_id = f"{package_name}:id/adjustable_temp"
 
-        # 1) Optional: Outdoor-Wert separat exportieren.
+        # 1) Optional: export outdoor value separately.
         outdoor_label = None
         outdoor_value = None
         for elem in root.iter():
@@ -470,7 +515,7 @@ class UIAutomatorParser:
                 "kind": "outdoor"
             })
 
-        # 2) Räume gezielt über roomoverview_room auslesen.
+        # 2) Read rooms via roomoverview_room.
         for room in root.iter():
             if room.get("resource-id", "") != room_res_id:
                 continue
@@ -478,35 +523,45 @@ class UIAutomatorParser:
             room_name = "Unknown"
             current_raw = ""
             current_c: Optional[float] = None
-            picker_values: List[Dict[str, Any]] = []
+            spinner_elem = None
 
             for elem in room.iter():
                 res_id = elem.get("resource-id", "")
                 text_value = elem.get("text", "").strip()
-                if not text_value:
-                    continue
 
                 if res_id == title_res_id and room_name == "Unknown":
                     room_name = text_value
                 elif res_id == cur_temp_res_id:
                     current_raw = text_value
                     current_c = self._parse_temperature(text_value)
-                elif res_id == picker_value_res_id:
-                    temp_c = self._parse_temperature(text_value)
-                    if temp_c is not None:
-                        picker_values.append({"raw": text_value, "c": temp_c})
+                elif res_id == spinner_res_id:
+                    spinner_elem = elem
 
             if room_name == "Unknown" and not current_raw:
                 continue
 
             setpoint_raw = None
             setpoint_c: Optional[float] = None
-            if picker_values:
-                # Im Danfoss-Spinner ist der mittlere Eintrag der aktive Sollwert.
-                selected_idx = len(picker_values) // 2
-                selected = picker_values[selected_idx]
-                setpoint_raw = selected["raw"]
-                setpoint_c = selected["c"]
+            picker_values: List[Dict[str, Any]] = []
+
+            # Extract setpoint from spinner using index=1
+            if spinner_elem is not None:
+                picker_values, setpoint_c = self._extract_spinner_values_with_indices(spinner_elem, package_name)
+
+                # Find raw value for the setpoint
+                if setpoint_c is not None:
+                    for pv in picker_values:
+                        if pv.get("c") == setpoint_c:
+                            setpoint_raw = pv.get("raw")
+                            break
+
+                logger.debug(
+                    f"extract_danfoss: room='{room_name}' current={current_c}°C "
+                    f"setpoint={setpoint_c}°C (raw='{setpoint_raw}') "
+                    f"picker_count={len(picker_values)} "
+                    f"min={min((v['c'] for v in picker_values), default=None)}°C "
+                    f"max={max((v['c'] for v in picker_values), default=None)}°C"
+                )
 
             thermostats.append({
                 "label": room_name,
@@ -520,7 +575,7 @@ class UIAutomatorParser:
                 "kind": "room"
             })
 
-        # Bei identischen Labels den naechsten Treffer als _2, _3 usw. kennzeichnen.
+        # Disambiguate duplicate slugs by appending _2, _3 etc.
         slug_counts: Dict[str, int] = {}
         for entry in thermostats:
             base_slug = entry["slug"]
@@ -532,50 +587,50 @@ class UIAutomatorParser:
 
     def is_value_changed(self, key: str, current_value: str) -> bool:
         """
-        Überprüft ob sich ein Wert seit dem letzten Check geändert hat
-        
+        Check whether a value has changed since the last call.
+
         Args:
-            key: Der Schlüssel für den Wert
-            current_value: Der aktuelle Wert
-            
+            key: The key for the value
+            current_value: The current value
+
         Returns:
-            True wenn Wert geändert, False wenn gleich
+            True if value changed, False if unchanged
         """
         old_value = self.last_values.get(key)
         self.last_values[key] = current_value
-        
+
         if old_value is None:
-            return True  # Erstes Mal, daher "geändert"
-        
+            return True  # First time, therefore "changed"
+
         changed = old_value != current_value
         if changed:
-            logger.debug(f"Wertänderung erkannt: {key} = {old_value} -> {current_value}")
-        
+            logger.debug(f"Value change detected: {key} = {old_value} -> {current_value}")
+
         return changed
-    
+
     def list_all_elements(self, verbose: bool = False) -> List[Dict[str, str]]:
         """
-        Listet alle UI-Elemente auf
-        
+        List all UI elements.
+
         Args:
-            verbose: Ausgabe aller Attribute
-            
+            verbose: Output all attributes
+
         Returns:
-            Liste aller Elemente
+            List of all elements
         """
         elements = []
         try:
             root = self._get_xml_root()
             if root is None:
                 return elements
-            
+
             for elem in root.iter():
                 element_info = {
                     "resource_id": elem.get("resource-id", ""),
                     "text": elem.get("text", ""),
                     "class": elem.get("class", ""),
                 }
-                
+
                 if verbose:
                     element_info.update({
                         "content_desc": elem.get("content-desc", ""),
@@ -584,21 +639,21 @@ class UIAutomatorParser:
                         "selected": elem.get("selected", ""),
                         "enabled": elem.get("enabled", "")
                     })
-                
-                if element_info["resource_id"]:  # Nur mit resource-id
+
+                if element_info["resource_id"]:  # Only elements with resource-id
                     elements.append(element_info)
-        
+
         except Exception as e:
-            logger.error(f"Fehler beim Auflisten von Elementen: {e}")
-        
+            logger.error(f"Error listing elements: {e}")
+
         return elements
-    
+
     def get_screen_info(self) -> Dict[str, Any]:
         """
-        Gibt allgemeine Bildschirm-Informationen
-        
+        Return general screen information.
+
         Returns:
-            Dictionary mit Bildschirm-Infos
+            Dictionary with screen info
         """
         info: Dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
@@ -606,18 +661,18 @@ class UIAutomatorParser:
             "element_count": 0,
             "packages": set()
         }
-        
+
         try:
             xml_str = self.get_ui_dump()
             if not xml_str:
                 return info
-            
+
             info["xml_size"] = len(xml_str)
             root = self._get_xml_root()
             if root is None:
                 return info
-            
-            # Zähle Elemente und sammle Packages
+
+            # Count elements and collect packages
             element_count = 0
             for elem in root.iter():
                 element_count += 1
@@ -625,30 +680,30 @@ class UIAutomatorParser:
                 if ":" in res_id:
                     package = res_id.split(":")[0]
                     info["packages"].add(package)
-            
+
             info["element_count"] = element_count
             info["packages"] = list(info["packages"])
-        
+
         except Exception as e:
-            logger.error(f"Fehler beim Abrufen von Bildschirm-Infos: {e}")
+            logger.error(f"Error fetching screen info: {e}")
 
         return info
 
     def dismiss_error_dialog(self) -> bool:
         """
-        Versucht, einen Fehlerdialog zu schließen indem der Standard-OK-Button
-        (android:id/button1) gesucht und angetippt wird.
+        Try to close an error dialog by finding and tapping the standard OK button
+        (android:id/button1).
 
         Returns:
-            True wenn ein Dialog-Button gefunden und angetippt wurde, sonst False
+            True if a dialog button was found and tapped, False otherwise
         """
         try:
             root = self._get_xml_root(use_cache=False)
             if root is None:
-                logger.debug("dismiss_error_dialog: Konnte XML nicht laden")
+                logger.debug("dismiss_error_dialog: could not load XML")
                 return False
 
-            # Suche nach dem Android-Standard OK-Button (android:id/button1)
+            # Search for the Android standard OK button (android:id/button1)
             for elem in root.iter():
                 res_id = elem.get("resource-id", "")
                 if res_id == "android:id/button1":
@@ -658,18 +713,17 @@ class UIAutomatorParser:
                         x = (bounds["x1"] + bounds["x2"]) // 2
                         y = (bounds["y1"] + bounds["y2"]) // 2
                         logger.info(
-                            f"dismiss_error_dialog: OK-Button (android:id/button1) "
-                            f"gefunden und betätigt bei {x},{y}"
+                            f"dismiss_error_dialog: OK button (android:id/button1) "
+                            f"found and tapped at {x},{y}"
                         )
                         self.adb.send_tap(x, y)
                         time.sleep(0.5)
                         return True
 
-            logger.debug("dismiss_error_dialog: Kein OK-Button (android:id/button1) gefunden")
+            logger.debug("dismiss_error_dialog: no OK button (android:id/button1) found")
             return False
 
         except Exception as e:
-            logger.error(f"dismiss_error_dialog: Fehler: {e}")
+            logger.error(f"dismiss_error_dialog: error: {e}")
             return False
-
 
