@@ -1,10 +1,11 @@
 """MQTT bridge for publishing ADB data via MQTT"""
+import inspect
 import logging
 import json
 import time
 import queue
 import threading
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Set, Tuple
 import paho.mqtt.client as mqtt
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,10 @@ class MQTTBridge:
         self.client = mqtt.Client(client_id="DanfossLink2Mqtt")
         self.connected = False
         self.callbacks: Dict[str, Callable] = {}
-        self._command_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+        self._subscription_patterns: Set[str] = set()
+        self._command_queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue()
+        self._recent_publishes: Dict[Tuple[str, str], float] = {}
+        self._recent_publishes_lock = threading.Lock()
         self._command_worker = threading.Thread(target=self._command_worker_loop, daemon=True)
         self._command_worker.start()
 
@@ -99,10 +103,7 @@ class MQTTBridge:
             online_topic = f"{self.topic_base}/status"
             self.client.publish(online_topic, "online", qos=1, retain=True)
             logger.debug(f"Published online status: {online_topic} = 'online'")
-            # Subscribe to command topics
-            command_topic = f"{self.topic_base}/command/#"
-            self.client.subscribe(command_topic)
-            logger.info(f"Subscribed: {command_topic}")
+            self._subscribe_registered_topics()
         else:
             logger.error(f"MQTT connection failed with code {rc}")
 
@@ -119,30 +120,111 @@ class MQTTBridge:
 
         logger.debug(f"MQTT message received: {topic} = {payload}")
 
-        # Extract command type from topic
-        parts = topic.split('/')
-        if len(parts) >= 3 and parts[0] == self.topic_base.split('/')[0]:
-            command_type = '/'.join(parts[2:])
+        if self._is_recent_self_publish(topic, payload):
+            logger.debug(f"Ignoring self-published MQTT echo: {topic} = {payload}")
+            return
 
-            if command_type in self.callbacks:
-                # Handlers can take several seconds (ADB/UI automation). Run
-                # them outside MQTT callback thread so outgoing publishes are
-                # not delayed until handler completion.
-                self._command_queue.put((command_type, payload))
+        topic_prefix = f"{self.topic_base}/"
+        if not topic.startswith(topic_prefix):
+            return
+
+        relative_topic = topic[len(topic_prefix):]
+        for topic_pattern in self.callbacks:
+            if not self._topic_matches(topic_pattern, relative_topic):
+                continue
+
+            # Handlers can take several seconds (ADB/UI automation). Run them
+            # outside MQTT callback thread so outgoing publishes are not delayed
+            # until handler completion.
+            self._command_queue.put((topic_pattern, relative_topic, payload))
+            return
 
     def _command_worker_loop(self) -> None:
         """Process command handlers sequentially outside MQTT callback thread."""
         while True:
-            command_type, payload = self._command_queue.get()
+            command_type, command_topic, payload = self._command_queue.get()
             try:
                 handler = self.callbacks.get(command_type)
                 if not handler:
                     continue
-                handler(payload)
+                self._invoke_handler(handler, command_topic, payload)
             except Exception as e:
-                logger.error(f"Error processing command '{command_type}': {e}")
+                logger.error(f"Error processing command '{command_topic}': {e}")
             finally:
                 self._command_queue.task_done()
+
+    def _subscribe_registered_topics(self) -> None:
+        """Subscribe to all currently registered command topics."""
+        for topic_pattern in sorted(self._subscription_patterns):
+            absolute_topic = f"{self.topic_base}/{topic_pattern}"
+            self.client.subscribe(absolute_topic)
+            logger.info(f"Subscribed: {absolute_topic}")
+
+    def _remember_publish(self, topic: str, payload: str) -> None:
+        """Remember a freshly published MQTT message to suppress subscription echoes."""
+        now = time.monotonic()
+        ttl_s = 5.0
+        cutoff = now - ttl_s
+        with self._recent_publishes_lock:
+            expired_keys = [key for key, timestamp in self._recent_publishes.items() if timestamp < cutoff]
+            for key in expired_keys:
+                self._recent_publishes.pop(key, None)
+            self._recent_publishes[(topic, payload)] = now
+
+    def _is_recent_self_publish(self, topic: str, payload: str) -> bool:
+        """Return whether the incoming MQTT message matches a recent local publish."""
+        now = time.monotonic()
+        ttl_s = 5.0
+        cutoff = now - ttl_s
+        key = (topic, payload)
+        with self._recent_publishes_lock:
+            expired_keys = [entry for entry, timestamp in self._recent_publishes.items() if timestamp < cutoff]
+            for entry in expired_keys:
+                self._recent_publishes.pop(entry, None)
+            timestamp = self._recent_publishes.get(key)
+            if timestamp is None:
+                return False
+            self._recent_publishes.pop(key, None)
+            return True
+
+    @staticmethod
+    def _topic_matches(topic_pattern: str, topic: str) -> bool:
+        """Return whether a relative MQTT topic matches a MQTT-style pattern."""
+        pattern_parts = topic_pattern.split('/')
+        topic_parts = topic.split('/')
+
+        pattern_index = 0
+        topic_index = 0
+        while pattern_index < len(pattern_parts) and topic_index < len(topic_parts):
+            part = pattern_parts[pattern_index]
+            if part == '#':
+                return True
+            if part != '+' and part != topic_parts[topic_index]:
+                return False
+            pattern_index += 1
+            topic_index += 1
+
+        if pattern_index < len(pattern_parts) and pattern_parts[pattern_index] == '#':
+            return True
+
+        return pattern_index == len(pattern_parts) and topic_index == len(topic_parts)
+
+    @staticmethod
+    def _invoke_handler(handler: Callable, topic: str, payload: str) -> None:
+        """Call a handler with either `(payload)` or `(topic, payload)` signature."""
+        signature = inspect.signature(handler)
+        parameters = list(signature.parameters.values())
+        positional = [
+            parameter
+            for parameter in parameters
+            if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_varargs = any(parameter.kind == parameter.VAR_POSITIONAL for parameter in parameters)
+
+        if accepts_varargs or len(positional) >= 2:
+            handler(topic, payload)
+        else:
+            handler(payload)
 
     def _on_publish(self, client, userdata, mid):
         """Callback after publish"""
@@ -175,6 +257,7 @@ class MQTTBridge:
                 payload_str = str(payload)
 
             self.client.publish(full_topic, payload_str, retain=retain, qos=qos)
+            self._remember_publish(full_topic, payload_str)
             logger.debug(f"Published: {full_topic} = {payload_str}")
             return True
         except Exception as e:
@@ -194,6 +277,7 @@ class MQTTBridge:
                 payload_str = str(payload)
 
             self.client.publish(topic, payload_str, retain=retain, qos=qos)
+            self._remember_publish(topic, payload_str)
             logger.debug(f"Published (absolute): {topic} = {payload_str}")
             return True
         except Exception as e:
@@ -202,13 +286,18 @@ class MQTTBridge:
 
     def register_command_handler(self, command_name: str, handler: Callable) -> None:
         """
-        Register a handler for a command.
+        Register a handler for a relative MQTT topic or MQTT-style topic pattern.
 
         Args:
-            command_name: The command name
+            command_name: Relative topic pattern below topic_base
             handler: The callback function
         """
         self.callbacks[command_name] = handler
+        self._subscription_patterns.add(command_name)
+        if self.connected:
+            absolute_topic = f"{self.topic_base}/{command_name}"
+            self.client.subscribe(absolute_topic)
+            logger.info(f"Subscribed: {absolute_topic}")
         logger.info(f"Command handler registered: {command_name}")
 
     def is_connected(self) -> bool:

@@ -107,6 +107,7 @@ All parameters are loaded from a single file: `config.yaml`.
 - `settings.mqtt_broker`, `settings.mqtt_port`, `settings.mqtt_topic_base` for MQTT
 - `settings.poll_interval` for runtime polling behavior
 - `settings.homeassistant_discovery` and `settings.homeassistant_discovery_prefix` for HA discovery
+- `settings.set_temperature_max_iterations` for how many UI readback/adjust cycles are tried before the app is restarted and the command is retried once
 
 ## MQTT Topics
 
@@ -115,13 +116,13 @@ Note: Examples below use `DanfossLink`. The prefix is configurable via `settings
 ### Commands (subscribed)
 
 ```text
-DanfossLink/command/set_temperature
+DanfossLink/thermostats/<slug>/setpoint
 ```
 
 Payload example:
 
-```json
-{"room": "living_room", "temperature": 21.5}
+```text
+21.5
 ```
 
 ### Thermostat Status (published)
@@ -130,7 +131,7 @@ Payload example:
 DanfossLink/thermostats/<slug>/label
 DanfossLink/thermostats/<slug>/kind
 DanfossLink/thermostats/<slug>/value
-DanfossLink/thermostats/<slug>/setpoint
+DanfossLink/thermostats/<slug>/setpoint_state
 DanfossLink/thermostats/<slug>/mode
 DanfossLink/thermostats/<slug>/hvac_action
 DanfossLink/thermostats/<slug>/setpoint_error
@@ -148,8 +149,10 @@ DanfossLink/status/error
 
 ### Setpoint Behavior
 
-- On `command/set_temperature`, the target setpoint is published immediately to `thermostats/<slug>/setpoint`.
+- `thermostats/<slug>/setpoint` is command-only and is not written by UI polling.
+- On `thermostats/<slug>/setpoint`, the requested target is published immediately to `thermostats/<slug>/setpoint_state`.
 - If UI readback lags behind, a short internal pending state prevents the polling cycle from immediately overwriting the new value with stale data.
+- If the target still cannot be reached after the configured number of adjustment cycles, the Danfoss app is restarted and the setpoint command is retried once.
 - The `setpoint_set_at` topic is no longer used.
 
 `hvac_action` is derived from current vs target temperature:
@@ -163,8 +166,8 @@ DanfossLink/status/error
 
 When discovery is enabled, one MQTT `climate` entity is published per room.
 
-- `temperature_command_topic`: `DanfossLink/command/set_temperature`
-- `temperature_state_topic`: `DanfossLink/thermostats/<slug>/setpoint`
+- `temperature_command_topic`: `DanfossLink/thermostats/<slug>/setpoint`
+- `temperature_state_topic`: `DanfossLink/thermostats/<slug>/setpoint_state`
 - `current_temperature_topic`: `DanfossLink/thermostats/<slug>/value`
 - `mode_state_topic`: `DanfossLink/thermostats/<slug>/mode`
 - `action_topic`: `DanfossLink/thermostats/<slug>/hvac_action`

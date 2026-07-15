@@ -107,13 +107,14 @@ class DanfossLink2MQTT:
 
     def _register_command_handlers(self) -> None:
         """Register all available command handlers"""
-        self.mqtt.register_command_handler("set_temperature", self._handle_set_temperature)
+        self.mqtt.register_command_handler("thermostats/+/setpoint", self._handle_setpoint_topic)
 
-    def _launch_danfoss_app(self) -> bool:
+    def _launch_danfoss_app(self, force_start: bool = False) -> bool:
         """Start the Danfoss app via SplashActivity and confirm error dialogs.
 
         Unified startup procedure for all triggers (initialize, app/start, reboot, recovery).
-        If the app is already running it will not be restarted and loading wait is skipped.
+        If the app is already running it will not be restarted and loading wait is skipped,
+        unless force_start is requested.
 
         Returns:
             True if app is running (was already running or started successfully)
@@ -140,7 +141,7 @@ class DanfossLink2MQTT:
             return False
 
         # Check if app is already running
-        if adb.is_app_running(DANFOSS_APP_PACKAGE):
+        if not force_start and adb.is_app_running(DANFOSS_APP_PACKAGE):
             logger.info("launch_app: Danfoss Link app is already running – no start needed")
             return True
 
@@ -158,6 +159,21 @@ class DanfossLink2MQTT:
         logger.info("launch_app: App started")
         return True
 
+    def _restart_danfoss_app(self, reason: str = "") -> bool:
+        """Force-restart the Danfoss app and wait until startup is complete."""
+        adb = self.adb
+        if not adb:
+            return False
+
+        if reason:
+            logger.warning(f"restart_app: {reason}")
+        else:
+            logger.warning("restart_app: restarting Danfoss Link app")
+
+        adb.stop_app(DANFOSS_APP_PACKAGE)
+        time.sleep(1.0)
+        return self._launch_danfoss_app(force_start=True)
+
     def _tap_rooms_button(self) -> bool:
         """Switch to room overview via main_rooms_button.
         If the button is not found, the app is restarted via SplashActivity.
@@ -174,11 +190,8 @@ class DanfossLink2MQTT:
                 "rooms_button: main_rooms_button not found – stopping and restarting app: "
                 "am start -n com.danfoss.linkapp/com.danfoss.cumulus.app.firstuse.SplashActivity"
             )
-            # Stop app cleanly first
-            adb.stop_app("com.danfoss.linkapp")
-            time.sleep(1.0)
-            # Same procedure as app/start: SplashActivity + dismiss error dialog
-            self._launch_danfoss_app()
+            if not self._restart_danfoss_app("rooms_button missing"):
+                return False
             # Check if rooms_button is now visible
             bounds = ui_parser.get_bounds(rooms_button_res_id)
             if bounds:
@@ -198,15 +211,28 @@ class DanfossLink2MQTT:
         time.sleep(0.6)
         return True
 
-    def _handle_set_temperature(self, payload: str) -> None:
-        """
-        Set the setpoint of a room via swipe on the Danfoss spinner.
+    def _handle_setpoint_topic(self, topic: str, payload: str) -> None:
+        """Set the target setpoint from `thermostats/<slug>/setpoint`."""
+        topic_parts = topic.split("/")
+        if len(topic_parts) != 3 or topic_parts[0] != "thermostats" or topic_parts[2] != "setpoint":
+            logger.error(f"set_temperature: unexpected topic '{topic}'")
+            return
 
-        Expected JSON payload: {"room": "<slug>", "temperature": <float>}
-        Example: {"room": "living_room", "temperature": 21.5}
-        """
-        import json as _json
+        room_slug = str(topic_parts[1]).strip()
+        if not room_slug:
+            logger.error(f"set_temperature: room slug missing in topic '{topic}'")
+            return
 
+        try:
+            target_temp = float(str(payload).strip())
+        except (TypeError, ValueError) as e:
+            logger.error(f"set_temperature: invalid payload '{payload}' for topic '{topic}': {e}")
+            return
+
+        self._set_room_temperature(room_slug, target_temp)
+
+    def _set_room_temperature(self, room_slug: str, target_temp: float) -> None:
+        """Set the setpoint of a room via swipe on the Danfoss spinner."""
         adb = self.adb
         ui_parser = self.ui_parser
         ui_config = self.ui_config
@@ -214,14 +240,6 @@ class DanfossLink2MQTT:
 
         if not adb or not ui_parser or not ui_config or not mqtt:
             logger.error("set_temperature: application not fully initialized")
-            return
-
-        try:
-            data = _json.loads(payload)
-            room_slug: str = str(data.get("room", "")).strip()
-            target_temp: float = float(data["temperature"])
-        except Exception as e:
-            logger.error(f"set_temperature: invalid payload '{payload}': {e}")
             return
 
         max_temp_limit = 26.0
@@ -235,6 +253,8 @@ class DanfossLink2MQTT:
             logger.error("set_temperature: 'room' missing in payload")
             return
 
+        setpoint_state_topic = f"thermostats/{room_slug}/setpoint_state"
+
         self.pending_setpoints[room_slug] = {
             "target": float(target_temp),
             "set_at": float(time.time())
@@ -242,98 +262,120 @@ class DanfossLink2MQTT:
 
         # Optimistic state update: publish command target immediately so
         # downstream consumers do not have to wait for the next poll/readback.
-        mqtt.publish(f"thermostats/{room_slug}/setpoint", target_temp)
+        mqtt.publish(setpoint_state_topic, target_temp)
 
         package_name = DANFOSS_APP_PACKAGE
         edit_res_id = f"{package_name}:id/roomoverview_edit_button"
 
-        # 1) Locate edit button position
-        edit_bounds = ui_parser.get_bounds(edit_res_id)
-        if not edit_bounds:
-            logger.error(f"set_temperature: edit button not found ({edit_res_id})")
-            return
+        def locate_edit_button() -> Optional[Dict[str, int]]:
+            edit_bounds = ui_parser.get_bounds(edit_res_id)
+            if not edit_bounds and self._tap_rooms_button():
+                edit_bounds = ui_parser.get_bounds(edit_res_id)
 
-        ex = (edit_bounds["x1"] + edit_bounds["x2"]) // 2
-        ey = (edit_bounds["y1"] + edit_bounds["y2"]) // 2
-        logger.info(f"set_temperature: edit button at {ex},{ey}")
+            if not edit_bounds:
+                logger.error(f"set_temperature: edit button not found ({edit_res_id})")
+                return None
 
-        # 2) Calculate steps (0.5°C per step)
+            return {
+                "x": (edit_bounds["x1"] + edit_bounds["x2"]) // 2,
+                "y": (edit_bounds["y1"] + edit_bounds["y2"]) // 2
+            }
+
+        # 1) Calculate steps (0.5°C per step)
         step_size = 0.5
         tolerance = 0.45  # Values in dump are in 0.5 steps
-        max_iterations = 10
+        max_iterations = max(1, int(ui_config.get_setting("set_temperature_max_iterations", 10)))
         burst_steps = max(1, int(ui_config.get_setting("set_temperature_burst_steps", 3)))
 
         inter_step_delay_s = float(ui_config.get_setting("set_temperature_swipe_pause_s", 2.0))
         readback_delay_s = float(ui_config.get_setting("set_temperature_readback_delay_s", 1.5))
 
-        # Tap edit button before each 0.5°C step.
-        def tap_edit_button() -> None:
-            adb.send_tap(ex, ey)
-            time.sleep(0.1)
+        def attempt_set_temperature(attempt_label: str) -> tuple[bool, Optional[float]]:
+            edit_button = locate_edit_button()
+            if not edit_button:
+                return False, None
 
-        # 3) Adjust in bursts until readback reaches target setpoint.
-        reached = False
-        last_setpoint: Optional[float] = None
-        recovery_attempted = False
-        for step in range(max_iterations):
-            spinner_info = ui_parser.get_room_spinner_bounds(package_name, room_slug, use_cache=False)
-            if not spinner_info:
-                if not recovery_attempted and self._tap_rooms_button():
-                    recovery_attempted = True
-                    logger.warning(
-                        "set_temperature: no spinner found, opened rooms view and retrying"
-                    )
-                    continue
+            ex = int(edit_button["x"])
+            ey = int(edit_button["y"])
+            logger.info(f"set_temperature: {attempt_label} edit button at {ex},{ey}")
 
-                logger.error(f"set_temperature: spinner for '{room_slug}' no longer found")
-                break
+            def tap_edit_button() -> None:
+                adb.send_tap(ex, ey)
+                time.sleep(0.1)
 
-            current_setpoint: Optional[float] = spinner_info.get("setpoint_c")
-            if current_setpoint is None:
-                if not recovery_attempted and self._tap_rooms_button():
-                    recovery_attempted = True
-                    logger.warning(
-                        "set_temperature: setpoint not parseable, opened rooms view and retrying"
-                    )
-                    continue
+            reached = False
+            last_setpoint: Optional[float] = None
+            recovery_attempted = False
+            for step in range(max_iterations):
+                spinner_info = ui_parser.get_room_spinner_bounds(package_name, room_slug, use_cache=False)
+                if not spinner_info:
+                    if not recovery_attempted and self._tap_rooms_button():
+                        recovery_attempted = True
+                        logger.warning(
+                            f"set_temperature: {attempt_label} no spinner found, opened rooms view and retrying"
+                        )
+                        continue
 
-                logger.error(f"set_temperature: current setpoint for '{room_slug}' unknown")
-                break
+                    logger.error(f"set_temperature: spinner for '{room_slug}' no longer found")
+                    break
 
-            last_setpoint = current_setpoint
-            diff = target_temp - current_setpoint
-            if abs(diff) <= tolerance:
-                reached = True
-                logger.info(f"set_temperature: target reached ({current_setpoint}°C)")
-                break
+                current_setpoint: Optional[float] = spinner_info.get("setpoint_c")
+                if current_setpoint is None:
+                    if not recovery_attempted and self._tap_rooms_button():
+                        recovery_attempted = True
+                        logger.warning(
+                            f"set_temperature: {attempt_label} setpoint not parseable, opened rooms view and retrying"
+                        )
+                        continue
 
-            cx: int = int(spinner_info["center_x"])
-            cy: int = int(spinner_info["center_y"])
-            step_px: int = int(spinner_info["step_px"])
-            swipe_direction = -1 if diff > 0 else 1  # up = warmer
+                    logger.error(f"set_temperature: current setpoint for '{room_slug}' unknown")
+                    break
 
-            remaining_steps = abs(round(diff / step_size))
-            planned_steps = max(1, min(remaining_steps, burst_steps))
-            logger.info(
-                f"set_temperature: burst {step + 1}: {current_setpoint}°C -> {target_temp}°C, "
-                f"{planned_steps} step(s)"
-            )
+                last_setpoint = current_setpoint
+                diff = target_temp - current_setpoint
+                if abs(diff) <= tolerance:
+                    reached = True
+                    logger.info(f"set_temperature: {attempt_label} target reached ({current_setpoint}°C)")
+                    break
 
-            tap_edit_button()
-            # A long swipe can cover multiple 0.5°C steps in one go.
-            total_dy = swipe_direction * step_px * planned_steps
-            swipe_duration_ms = max(220, int(220 * planned_steps))
-            adb.send_swipe(cx, cy, cx, cy + total_dy, duration_ms=swipe_duration_ms)
+                cx: int = int(spinner_info["center_x"])
+                cy: int = int(spinner_info["center_y"])
+                step_px: int = int(spinner_info["step_px"])
+                swipe_direction = -1 if diff > 0 else 1  # up = warmer
 
-            if planned_steps > 1:
-                time.sleep(inter_step_delay_s)
+                remaining_steps = abs(round(diff / step_size))
+                planned_steps = max(1, min(remaining_steps, burst_steps))
+                logger.info(
+                    f"set_temperature: {attempt_label} burst {step + 1}: {current_setpoint}°C -> {target_temp}°C, "
+                    f"{planned_steps} step(s)"
+                )
 
-            # Short wait after burst then read setpoint via fresh dump.
-            time.sleep(readback_delay_s)
+                tap_edit_button()
+                # A long swipe can cover multiple 0.5°C steps in one go.
+                total_dy = swipe_direction * step_px * planned_steps
+                swipe_duration_ms = max(220, int(220 * planned_steps))
+                adb.send_swipe(cx, cy, cx, cy + total_dy, duration_ms=swipe_duration_ms)
 
-        # 4) Publish status
+                if planned_steps > 1:
+                    time.sleep(inter_step_delay_s)
+
+                # Short wait after burst then read setpoint via fresh dump.
+                time.sleep(readback_delay_s)
+
+            return reached, last_setpoint
+
+        # 2) Adjust in bursts until readback reaches target setpoint.
+        reached, last_setpoint = attempt_set_temperature("attempt 1")
+
+        if not reached and self._restart_danfoss_app(
+            f"set_temperature: target not reached for '{room_slug}' (target={target_temp}, last={last_setpoint})"
+        ):
+            self._tap_rooms_button()
+            reached, last_setpoint = attempt_set_temperature("attempt 2 after app restart")
+
+        # 3) Publish status
         if reached:
-            mqtt.publish(f"thermostats/{room_slug}/setpoint", target_temp)
+            mqtt.publish(setpoint_state_topic, target_temp)
             logger.info(f"set_temperature: '{room_slug}' setpoint set to {target_temp}°C")
         else:
             mqtt.publish(
@@ -394,9 +436,10 @@ class DanfossLink2MQTT:
 
         thermostats_payload: List[Dict[str, Any]] = []
         for thermostat in thermostats:
-            slug = thermostat.get("slug")
-            if not slug:
+            slug_value = thermostat.get("slug")
+            if not slug_value:
                 continue
+            slug = str(slug_value)
 
             base_topic = f"thermostats/{slug}"
             measured_setpoint = self._to_float(thermostat.get("setpoint_c"))
@@ -422,7 +465,7 @@ class DanfossLink2MQTT:
             self.mqtt.publish(f"{base_topic}/label", thermostat.get("label", ""))
             self.mqtt.publish(f"{base_topic}/kind", thermostat.get("kind", "room"))
             self.mqtt.publish(f"{base_topic}/value", thermostat.get("temperature_c", ""))
-            self.mqtt.publish(f"{base_topic}/setpoint", setpoint_to_publish)
+            self.mqtt.publish(f"{base_topic}/setpoint_state", setpoint_to_publish)
 
             # Derive hvac_action from setpoint/current: setpoint < value -> idle, else heating.
             current_temp = self._to_float(thermostat.get("temperature_c"))
@@ -481,11 +524,8 @@ class DanfossLink2MQTT:
                 "name": f"{label}",
                 "unique_id": f"{MQTT_TOPIC_BASE}_{room_key}_climate",
                 "icon": "mdi:heating-coil",
-                "temperature_command_topic": f"{MQTT_TOPIC_BASE}/command/set_temperature",
-                "temperature_command_template": (
-                    "{\"room\": \"" + room_key + "\", \"temperature\": {{ value }}}"
-                ),
-                "temperature_state_topic": f"{base_state}/setpoint",
+                "temperature_command_topic": f"{MQTT_TOPIC_BASE}/thermostats/{room_key}/setpoint",
+                "temperature_state_topic": f"{base_state}/setpoint_state",
                 "current_temperature_topic": f"{base_state}/value",
                 "mode_state_topic": f"{base_state}/mode",
                 "action_topic": f"{base_state}/hvac_action",

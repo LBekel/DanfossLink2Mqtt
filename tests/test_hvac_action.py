@@ -1,7 +1,6 @@
 """Unit-Tests fuer HVAC-Action-Ableitung."""
 import unittest
-from unittest.mock import Mock
-import json
+from unittest.mock import Mock, patch
 import time
 
 from core.adb_controller import ADBController
@@ -103,21 +102,59 @@ class TestSetTemperaturePublish(unittest.TestCase):
         app.ui_config = Mock()
         app.ui_config.get_setting = Mock(side_effect=lambda key, default=None: default)
         app.mqtt = Mock()
+        publish_mock = Mock()
+        app.mqtt.publish = publish_mock
+        app._tap_rooms_button = Mock(return_value=False)
+        app._restart_danfoss_app = Mock(return_value=False)
 
         # Force an early return after immediate publish to prove
         # publishing does not wait for spinner/polling success.
         app.ui_parser.get_bounds.return_value = None
 
-        payload = json.dumps({"room": "hwr_eg", "temperature": 23.5})
-        app._handle_set_temperature(payload)
+        app._handle_setpoint_topic("thermostats/hwr_eg/setpoint", "23.5")
 
-        app.mqtt.publish.assert_any_call("thermostats/hwr_eg/setpoint", 23.5)
+        publish_mock.assert_any_call("thermostats/hwr_eg/setpoint_state", 23.5)
+
+    def test_restart_is_triggered_and_command_retried_when_target_is_not_reached(self):
+        app = DanfossLink2MQTT()
+        app.adb = Mock()
+        app.ui_parser = Mock()
+        app.ui_config = Mock()
+
+        def get_setting(key, default=None):
+            if key == "set_temperature_max_iterations":
+                return 2
+            return default
+
+        app.ui_config.get_setting = Mock(side_effect=get_setting)
+        app.mqtt = Mock()
+        publish_mock = Mock()
+        app.mqtt.publish = publish_mock
+        app.ui_parser.get_bounds.return_value = {"x1": 10, "x2": 20, "y1": 30, "y2": 50}
+        app.ui_parser.get_room_spinner_bounds.side_effect = [
+            {"setpoint_c": 20.0, "center_x": 100, "center_y": 200, "step_px": 10},
+            {"setpoint_c": 20.0, "center_x": 100, "center_y": 200, "step_px": 10},
+            {"setpoint_c": 20.0, "center_x": 100, "center_y": 200, "step_px": 10},
+            {"setpoint_c": 22.0, "center_x": 100, "center_y": 200, "step_px": 10},
+        ]
+        app._restart_danfoss_app = Mock(return_value=True)
+        app._tap_rooms_button = Mock(return_value=True)
+
+        with patch("core.main_ui.time.sleep", return_value=None):
+            app._handle_setpoint_topic("thermostats/hwr_eg/setpoint", "22.0")
+
+        app._restart_danfoss_app.assert_called_once()
+        publish_mock.assert_any_call("thermostats/hwr_eg/setpoint_state", 22.0)
+        published_topics = [call.args[0] for call in publish_mock.call_args_list]
+        self.assertNotIn("thermostats/hwr_eg/setpoint_error", published_topics)
 
 
 class TestPendingSetpointOverride(unittest.TestCase):
     def test_polling_uses_pending_setpoint_until_ui_catches_up(self):
         app = DanfossLink2MQTT()
         app.mqtt = Mock()
+        publish_mock = Mock()
+        app.mqtt.publish = publish_mock
         app.ui_parser = Mock()
         app.ui_parser.extract_danfoss_thermostats.return_value = [
             {
@@ -135,8 +172,10 @@ class TestPendingSetpointOverride(unittest.TestCase):
 
         app._publish_danfoss_thermostats(force=True)
 
-        app.mqtt.publish.assert_any_call("thermostats/hwr_eg/setpoint", 22.5)
-        app.mqtt.publish.assert_any_call("thermostats/hwr_eg/hvac_action", "heating")
+        publish_mock.assert_any_call("thermostats/hwr_eg/setpoint_state", 22.5)
+        publish_mock.assert_any_call("thermostats/hwr_eg/hvac_action", "heating")
+        published_topics = [call.args[0] for call in publish_mock.call_args_list]
+        self.assertNotIn("thermostats/hwr_eg/setpoint", published_topics)
 
 
 if __name__ == "__main__":

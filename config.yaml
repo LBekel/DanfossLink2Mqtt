@@ -25,9 +25,10 @@ settings:
   # Steuer-/Parser-Verhalten
   poll_interval: 5
   log_level: "INFO"
+  set_temperature_max_iterations: 5
   set_temperature_burst_steps: 30
   set_temperature_swipe_pause_s: 2.0
-  set_temperature_readback_delay_s: 1.5
+  set_temperature_readback_delay_s: 2.0
   publish_only_changes: true
   cache_duration: 5
   ui_automator_timeout: 5
